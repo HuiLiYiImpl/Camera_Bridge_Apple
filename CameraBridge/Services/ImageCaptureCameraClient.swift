@@ -371,7 +371,6 @@ final class ImageCaptureCameraClient: NSObject, ObservableObject {
         guard let active = activeDownloads[handle] else { return }
         active.gate.cancel()
         active.progress.cancel()
-        connectedCamera?.cancelDownload()
     }
 
     func cancelAllDownloads() {
@@ -412,8 +411,8 @@ final class ImageCaptureCameraClient: NSObject, ObservableObject {
             details: CameraDetails(
                 manufacturer: manufacturer(for: camera),
                 model: camera.productKind ?? camera.name,
-                deviceVersion: camera.moduleVersion,
-                serialNumber: camera.serialNumberString
+                deviceVersion: nil,
+                serialNumber: nil
             )
         )
     }
@@ -441,15 +440,14 @@ final class ImageCaptureCameraClient: NSObject, ObservableObject {
 
     private func isUSBCamera(_ device: ICDevice) -> Bool {
         guard device is ICCameraDevice else { return false }
-        return device.transportType == ICDeviceTransport.transportTypeUSB
-            || device.transportType == ICDeviceTransport.transportTypeMassStorage
+        return device.transportType == ICDeviceTransport.transportTypeUSB.rawValue
+            || device.transportType == ICDeviceTransport.transportTypeMassStorage.rawValue
             || device.usbVendorID != 0
             || device.usbProductID != 0
     }
 
     private func deviceID(for device: ICDevice) -> String {
-        device.persistentIDString
-            ?? device.uuidString
+        device.uuidString
             ?? String(format: "%08X:%04X:%04X", device.usbLocationID, device.usbVendorID, device.usbProductID)
     }
 
@@ -459,7 +457,7 @@ final class ImageCaptureCameraClient: NSObject, ObservableObject {
                 id: id,
                 name: camera.name ?? camera.productKind ?? "USB 相机",
                 productKind: camera.productKind,
-                serialNumber: camera.serialNumberString,
+                serialNumber: nil,
                 vendorID: camera.usbVendorID,
                 productID: camera.usbProductID
             )
@@ -539,7 +537,6 @@ final class ImageCaptureCameraClient: NSObject, ObservableObject {
 
     private func terminateDownloads(with error: Error) {
         guard !activeDownloads.isEmpty else { return }
-        connectedCamera?.cancelDownload()
         let downloads = activeDownloads
         activeDownloads.removeAll()
         for (handle, active) in downloads {

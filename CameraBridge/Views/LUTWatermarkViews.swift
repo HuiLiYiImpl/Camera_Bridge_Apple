@@ -26,6 +26,29 @@ struct LUTLibraryScreen: View {
     }
 
     var body: some View {
+        libraryContent
+            .navigationTitle("LUT 库")
+            .searchable(text: $search, prompt: "搜索 LUT")
+            .toolbarBackground(palette.night, for: .navigationBar)
+            .toolbar {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button { showingWatermarks = true } label: { Image(systemName: "textformat") }
+                    Button { showingImporter = true } label: { Image(systemName: "plus") }
+                }
+            }
+            .fileImporter(
+                isPresented: $showingImporter,
+                allowedContentTypes: importTypes,
+                allowsMultipleSelection: true,
+                onCompletion: handleImport
+            )
+            .sheet(isPresented: $showingWatermarks) { NavigationStack { WatermarkLibraryScreen() } }
+            .sheet(item: $editing) { LUTEditSheet(entry: $0) }
+            .onChange(of: photoItem) { _, item in loadSample(from: item) }
+            .onChange(of: intensity) { _, _ in renderSample() }
+    }
+
+    private var libraryContent: some View {
         ZStack {
             palette.night.ignoresSafeArea()
             ScrollView {
@@ -36,41 +59,43 @@ struct LUTLibraryScreen: View {
                         ContentUnavailableView("没有 LUT", systemImage: "camera.filters", description: Text("导入 .cube、Hald PNG 或 Adobe XMP。"))
                             .frame(minHeight: 260)
                     } else {
-                        LazyVStack(spacing: 10) { ForEach(filtered) { LUTRow(entry: $0, selected: selectedLUT == $0.id, select: { selectedLUT = $0.id; renderSample() }, edit: { editing = $0 }) } }
+                        LazyVStack(spacing: 10) {
+                            ForEach(filtered) { entry in
+                                LUTRow(
+                                    entry: entry,
+                                    selected: selectedLUT == entry.id,
+                                    select: { selectedLUT = entry.id; renderSample() },
+                                    edit: { editing = entry }
+                                )
+                            }
+                        }
                     }
                 }
                 .padding().padding(.bottom, 80)
             }
         }
-        .navigationTitle("LUT 库")
-        .searchable(text: $search, prompt: "搜索 LUT")
-        .toolbarBackground(palette.night, for: .navigationBar)
-        .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                Button { showingWatermarks = true } label: { Image(systemName: "textformat") }
-                Button { showingImporter = true } label: { Image(systemName: "plus") }
+    }
+
+    private var importTypes: [UTType] {
+        [UTType(filenameExtension: "cube")!, .png, UTType(filenameExtension: "xmp")!]
+    }
+
+    private func handleImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            Task { for url in urls { await model.importLUT(from: url) } }
+        case .failure(let error):
+            model.alertMessage = error.localizedDescription
+        }
+    }
+
+    private func loadSample(from item: PhotosPickerItem?) {
+        Task {
+            if let data = try? await item?.loadTransferable(type: Data.self), let image = UIImage(data: data) {
+                sampleImage = image
+                renderSample()
             }
         }
-        .fileImporter(
-            isPresented: $showingImporter,
-            allowedContentTypes: [UTType(filenameExtension: "cube")!, .png, UTType(filenameExtension: "xmp")!],
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
-            case .success(let urls): Task { for url in urls { await model.importLUT(from: url) } }
-            case .failure(let error): model.alertMessage = error.localizedDescription
-            }
-        }
-        .sheet(isPresented: $showingWatermarks) { NavigationStack { WatermarkLibraryScreen() } }
-        .sheet(item: $editing) { LUTEditSheet(entry: $0) }
-        .onChange(of: photoItem) { _, item in
-            Task {
-                if let data = try? await item?.loadTransferable(type: Data.self), let image = UIImage(data: data) {
-                    sampleImage = image; renderSample()
-                }
-            }
-        }
-        .onChange(of: intensity) { _, _ in renderSample() }
     }
 
     private var previewCard: some View {
