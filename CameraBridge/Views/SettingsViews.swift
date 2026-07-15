@@ -18,20 +18,24 @@ struct SettingsScreen: View {
                 .pickerStyle(.navigationLink)
                 themePreview
             }
-            Section("连接") {
+            Section {
                 Picker("相机品牌", selection: $model.config.brand) { ForEach(CameraBrand.allCases) { Text($0.title + ($0.available ? "" : " · 即将支持")).tag($0) } }
                 TextField("PTP/IP 地址", text: $model.config.host).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.numbersAndPunctuation)
                 TextField("端口", value: $model.config.port, format: .number).keyboardType(.numberPad)
                 Toggle("传输期间保持屏幕常亮", isOn: $model.config.keepWiFiAlive)
+            } header: {
+                Text("连接")
             } footer: {
                 Text("iOS 不允许第三方 App 永久锁定 Wi-Fi；相机下载进入后台后只能获得有限收尾时间。")
             }
-            Section("下载与导出") {
+            Section {
                 Toggle("下载后加入系统照片图库", isOn: $model.config.autoExport)
                 Stepper("JPEG 质量 \(model.config.jpegQuality)%", value: $model.config.jpegQuality, in: 70 ... 100)
                 TextField("文件命名规则", text: $model.config.fileNamingRule)
                 Toggle("启用缩略图缓存", isOn: $model.config.thumbnailCacheEnabled)
                 Button("清理缩略图缓存", action: model.clearThumbnailCache)
+            } header: {
+                Text("下载与导出")
             } footer: {
                 Text("所有文件先保存在“文件 > 我的 iPhone/iPad > Camera Bridge”；加入照片图库后会产生独立副本。")
             }
