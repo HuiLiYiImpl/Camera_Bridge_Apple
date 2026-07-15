@@ -4,7 +4,12 @@ import UIKit
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var config: CameraConfig { didSet { store.save(config: config) } }
+    @Published var config: CameraConfig {
+        didSet {
+            store.save(config: config)
+            updateIdleTimerPolicy()
+        }
+    }
     @Published private(set) var workflow: Workflow = .waiting
     @Published private(set) var session: CameraSession?
     @Published private(set) var photos: [PhotoAsset] = []
@@ -17,7 +22,7 @@ final class AppModel: ObservableObject {
     @Published var lightScenes: [LightScene] { didSet { store.save(lightScenes: lightScenes) } }
     @Published var notice: String?
     @Published var alertMessage: String?
-    @Published var exportProgress: Double?
+    @Published var exportProgress: Double? { didSet { updateIdleTimerPolicy() } }
 
     let usbClient: ImageCaptureCameraClient
     private let store: AppStore
@@ -246,13 +251,13 @@ final class AppModel: ObservableObject {
     private func startDownloadWorker() {
         guard downloadWorker == nil else { return }
         downloadWorker = Task { [weak self] in await self?.processDownloadQueue() }
+        updateIdleTimerPolicy()
     }
 
     private func processDownloadQueue() async {
-        UIApplication.shared.isIdleTimerDisabled = true
         defer {
-            UIApplication.shared.isIdleTimerDisabled = false
             downloadWorker = nil
+            updateIdleTimerPolicy()
             if session != nil { workflow = .connected }
         }
         while let index = downloadTasks.firstIndex(where: { $0.status == .queued }) {
@@ -408,9 +413,17 @@ final class AppModel: ObservableObject {
                 let sourceURL = store.url(for: record)
                 let suffix = [lutEntry == nil ? nil : "LUT", watermark == nil ? nil : "WM"].compactMap { $0 }.joined(separator: "_")
                 if record.kind == .video {
-                    let output = store.uniqueDownloadURL(named: sourceURL.deletingPathExtension().lastPathComponent + "_\(suffix).mp4")
+                    let output = store.uniqueDownloadURL(named: sourceURL.deletingPathExtension().lastPathComponent + "_\(suffix.isEmpty ? "EDIT" : suffix).mp4")
                     let lut = try lutEntry.map { try self.lut(for: $0) }
-                    try await VideoProcessor.shared.export(sourceURL: sourceURL, destinationURL: output, lut: lut, intensity: intensity) { [weak self] value in
+                    try await VideoProcessor.shared.export(
+                        sourceURL: sourceURL,
+                        destinationURL: output,
+                        lut: lut,
+                        intensity: intensity,
+                        rotation: rotation,
+                        watermark: watermark,
+                        metadata: videoMetadata(for: record)
+                    ) { [weak self] value in
                         Task { @MainActor [weak self] in self?.exportProgress = value }
                     }
                     addEditedRecord(url: output, kind: .video)
@@ -423,7 +436,7 @@ final class AppModel: ObservableObject {
                     if rotation % 360 != 0 { image = image.rotated(by: rotation) }
                     if let watermark { image = try WatermarkRenderer.shared.render(image: image, metadata: metadata, preset: watermark) }
                     let output = store.uniqueDownloadURL(named: sourceURL.deletingPathExtension().lastPathComponent + "_\(suffix).jpg")
-                    try MediaLibraryService.writeJPEG(image: image, metadata: metadata, quality: Double(config.jpegQuality) / 100, to: output)
+                    try MediaLibraryService.writeJPEG(image: image, metadata: metadata, quality: jpegQuality(for: watermark), to: output)
                     addEditedRecord(url: output, kind: .image)
                     try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .image)
                 }
@@ -458,7 +471,7 @@ final class AppModel: ObservableObject {
                 let suffix = [lutEntry == nil ? nil : "LUT", watermark == nil ? nil : "WM"].compactMap { $0 }.joined(separator: "_")
                 let stem = URL(fileURLWithPath: asset.name).deletingPathExtension().lastPathComponent
                 let output = store.uniqueDownloadURL(named: "\(stem)_\(suffix.isEmpty ? "EDIT" : suffix).jpg")
-                try MediaLibraryService.writeJPEG(image: outputImage, metadata: metadata, quality: Double(config.jpegQuality) / 100, to: output)
+                try MediaLibraryService.writeJPEG(image: outputImage, metadata: metadata, quality: jpegQuality(for: watermark), to: output)
                 addEditedRecord(url: output, kind: .image)
                 try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .image)
                 notice = "导出完成"
@@ -486,7 +499,15 @@ final class AppModel: ObservableObject {
                     let suffix = [lutEntry == nil ? nil : "LUT", watermark == nil ? nil : "WM"].compactMap { $0 }.joined(separator: "_")
                     if record.kind == .video {
                         let output = store.uniqueDownloadURL(named: sourceURL.deletingPathExtension().lastPathComponent + "_\(suffix.isEmpty ? "EDIT" : suffix).mp4")
-                        try await VideoProcessor.shared.export(sourceURL: sourceURL, destinationURL: output, lut: loadedLUT, intensity: intensity) { [weak self] child in
+                        try await VideoProcessor.shared.export(
+                            sourceURL: sourceURL,
+                            destinationURL: output,
+                            lut: loadedLUT,
+                            intensity: intensity,
+                            rotation: rotation,
+                            watermark: watermark,
+                            metadata: videoMetadata(for: record)
+                        ) { [weak self] child in
                             Task { @MainActor [weak self] in self?.exportProgress = (Double(completed) + child) / Double(records.count) }
                         }
                         addEditedRecord(url: output, kind: .video)
@@ -499,7 +520,7 @@ final class AppModel: ObservableObject {
                         if rotation % 360 != 0 { image = image.rotated(by: rotation) }
                         if let watermark { image = try WatermarkRenderer.shared.render(image: image, metadata: metadata, preset: watermark) }
                         let output = store.uniqueDownloadURL(named: sourceURL.deletingPathExtension().lastPathComponent + "_\(suffix.isEmpty ? "EDIT" : suffix).jpg")
-                        try MediaLibraryService.writeJPEG(image: image, metadata: metadata, quality: Double(config.jpegQuality) / 100, to: output)
+                        try MediaLibraryService.writeJPEG(image: image, metadata: metadata, quality: jpegQuality(for: watermark), to: output)
                         addEditedRecord(url: output, kind: .image)
                         try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .image)
                     }
@@ -516,6 +537,28 @@ final class AppModel: ObservableObject {
     private func addEditedRecord(url: URL, kind: MediaKind) {
         let size = ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0
         downloads.insert(DownloadRecord(name: url.lastPathComponent, size: size, relativePath: url.lastPathComponent, kind: kind, edited: true), at: 0)
+    }
+
+    private func jpegQuality(for watermark: WatermarkPreset?) -> Double {
+        if let watermark { return min(max(watermark.quality, 0.5), 1) }
+        return min(max(Double(config.jpegQuality) / 100, 0.1), 1)
+    }
+
+    private func videoMetadata(for record: DownloadRecord) -> PhotoMetadata {
+        PhotoMetadata(
+            cameraBrand: session?.details.manufacturer,
+            cameraModel: session?.details.model ?? session?.name,
+            lensModel: session?.details.lensName,
+            iso: session?.details.recentISO,
+            shutterSpeed: session?.details.recentShutter,
+            aperture: session?.details.recentAperture,
+            focalLength: session?.details.recentFocalLength,
+            capturedAt: session?.details.recentCapturedAt ?? record.completedAt
+        )
+    }
+
+    private func updateIdleTimerPolicy() {
+        UIApplication.shared.isIdleTimerDisabled = config.keepWiFiAlive && (downloadWorker != nil || exportProgress != nil)
     }
 
     func exportDiagnostics() async -> URL? {
