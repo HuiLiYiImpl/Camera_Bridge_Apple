@@ -1,5 +1,5 @@
 import Foundation
-import UIKit
+import Darwin
 
 actor DiagnosticsLogger {
     struct Event: Codable {
@@ -55,8 +55,8 @@ actor DiagnosticsLogger {
         let snapshot = ExportSnapshot(
             generatedAt: .now,
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown",
-            system: UIDevice.current.systemName + " " + UIDevice.current.systemVersion,
-            device: UIDevice.current.model,
+            system: ProcessInfo.processInfo.operatingSystemVersionString,
+            device: Self.machineIdentifier(),
             configuredHost: "\(config.host):\(config.port)",
             session: session,
             events: events
@@ -76,5 +76,18 @@ actor DiagnosticsLogger {
         var configuredHost: String
         var session: CameraSession?
         var events: [Event]
+    }
+
+    /// Returns the hardware identifier (for example, `iPhone16,2`) without
+    /// touching UIKit's main-actor-isolated `UIDevice` singleton.
+    private static func machineIdentifier() -> String {
+        var systemInfo = utsname()
+        guard uname(&systemInfo) == 0 else { return "unknown" }
+        let capacity = MemoryLayout.size(ofValue: systemInfo.machine)
+        return withUnsafePointer(to: &systemInfo.machine) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: capacity) {
+                String(cString: $0)
+            }
+        }
     }
 }

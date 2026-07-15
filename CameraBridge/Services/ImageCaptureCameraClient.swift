@@ -563,7 +563,11 @@ final class ImageCaptureCameraClient: NSObject, ObservableObject {
 
 // MARK: - ImageCaptureCore delegates
 
-extension ImageCaptureCameraClient: ICDeviceBrowserDelegate {
+// ImageCaptureCore delivers device delegate callbacks on the main thread. The
+// Objective-C protocols do not express that isolation, so defer the conformance
+// check to the runtime while keeping the client and all of its state on
+// MainActor.
+extension ImageCaptureCameraClient: @preconcurrency ICDeviceBrowserDelegate {
     func deviceBrowser(_ browser: ICDeviceBrowser, didAdd device: ICDevice, moreComing: Bool) {
         guard isUSBCamera(device), let camera = device as? ICCameraDevice else { return }
         camerasByID[deviceID(for: camera)] = camera
@@ -575,7 +579,7 @@ extension ImageCaptureCameraClient: ICDeviceBrowserDelegate {
     }
 }
 
-extension ImageCaptureCameraClient: ICCameraDeviceDelegate {
+extension ImageCaptureCameraClient: @preconcurrency ICCameraDeviceDelegate {
     func device(_ device: ICDevice, didOpenSessionWithError error: (any Error)?) {
         if let error { connectionState = .failed(error.localizedDescription) }
     }
