@@ -51,7 +51,6 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.huiliyi.CameraBridge
-        PRODUCT_NAME: Camera Bridge
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
     scheme:
