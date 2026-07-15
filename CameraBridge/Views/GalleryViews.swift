@@ -7,6 +7,8 @@ struct GalleryScreen: View {
     @State private var filter: MediaFilter = .all
     @State private var selected: Set<UInt32> = []
     @State private var preview: PhotoAsset?
+    @State private var batchSelection: [PhotoAsset] = []
+    @State private var showingBatchEditor = false
 
     private let columns = [GridItem(.adaptive(minimum: 105), spacing: 3)]
     private var filtered: [PhotoAsset] { model.photos.filter { filter.matches($0.kind) } }
@@ -42,6 +44,9 @@ struct GalleryScreen: View {
                 }
             }
             if !selected.isEmpty { selectionBar }
+            if let progress = model.exportProgress, let status = model.remoteBatchStatus {
+                batchProgressOverlay(progress: progress, status: status)
+            }
         }
         .navigationTitle("相机相册")
         .toolbarBackground(palette.night, for: .navigationBar)
@@ -54,6 +59,13 @@ struct GalleryScreen: View {
             }
         }
         .fullScreenCover(item: $preview) { asset in PhotoPreviewScreen(asset: asset) }
+        .sheet(isPresented: $showingBatchEditor) {
+            RemoteBatchEditorSheet(assets: batchSelection) {
+                selected.removeAll()
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
     }
 
     private var filterBar: some View {
@@ -72,25 +84,193 @@ struct GalleryScreen: View {
     }
 
     private var selectionBar: some View {
-        HStack {
+        HStack(spacing: 12) {
             VStack(alignment: .leading) {
                 Text("已选择 \(selected.count) 项").font(.headline)
-                Text("创建原片下载任务").font(.caption).foregroundStyle(palette.text.opacity(0.55))
+                Text("下载原片，或批量应用 LUT / 水印").font(.caption).foregroundStyle(palette.text.opacity(0.55))
             }
             Spacer()
             Button {
                 model.enqueue(model.photos.filter { selected.contains($0.handle) })
                 selected.removeAll()
-            } label: { Label("下载", systemImage: "arrow.down.circle.fill").padding(.horizontal, 14).padding(.vertical, 10) }
-                .background(palette.accent, in: Capsule()).foregroundStyle(palette.night)
+            } label: {
+                Label("下载", systemImage: "arrow.down.circle.fill")
+                    .padding(.horizontal, 12).padding(.vertical, 10)
+            }
+            .background(palette.elevated, in: Capsule()).foregroundStyle(palette.text)
+            Button {
+                batchSelection = model.photos.filter { selected.contains($0.handle) }
+                showingBatchEditor = true
+            } label: {
+                Label("处理", systemImage: "wand.and.stars")
+                    .padding(.horizontal, 12).padding(.vertical, 10)
+            }
+            .background(palette.accent, in: Capsule()).foregroundStyle(palette.night)
+            .disabled(model.exportProgress != nil || model.isBusy)
         }
         .padding(14).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24)).padding()
+    }
+
+    private func batchProgressOverlay(progress: Double, status: String) -> some View {
+        ZStack {
+            Color.black.opacity(0.58).ignoresSafeArea()
+            VStack(spacing: 14) {
+                ProgressView(value: min(max(progress, 0), 1))
+                    .progressViewStyle(.linear)
+                    .tint(palette.accent)
+                Text(status).font(.headline).multilineTextAlignment(.center)
+                Text("总体进度 \(Int(min(max(progress, 0), 1) * 100))%")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("取消处理", role: .destructive) { model.cancelRemoteBatchExport() }
+                    .buttonStyle(.bordered)
+            }
+            .padding(22)
+            .frame(maxWidth: 340)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func tap(_ asset: PhotoAsset) {
         if selected.isEmpty { preview = asset }
         else if selected.contains(asset.handle) { selected.remove(asset.handle) }
         else { selected.insert(asset.handle) }
+    }
+}
+
+private struct RemoteBatchEditorSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.bridgePalette) private var palette
+
+    let assets: [PhotoAsset]
+    let onStarted: () -> Void
+
+    @State private var selectedLUT: UUID?
+    @State private var selectedWatermark: UUID?
+    @State private var intensity = 1.0
+    @State private var rotation = 0
+
+    private var photos: [PhotoAsset] {
+        assets.filter { $0.kind == .image || $0.kind == .rawImage }
+    }
+
+    private var videos: [PhotoAsset] { assets.filter { $0.kind == .video } }
+    private var unsupported: [PhotoAsset] { assets.filter { $0.kind == .unknown } }
+    private var selectedWatermarkPreset: WatermarkPreset? {
+        model.watermarks.first { $0.id == selectedWatermark }
+    }
+    private var hasEffect: Bool { selectedLUT != nil || selectedWatermark != nil || rotation != 0 }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("可处理照片", value: "\(photos.count)")
+                    if !videos.isEmpty { LabeledContent("需先下载的视频", value: "\(videos.count)") }
+                    if !unsupported.isEmpty { LabeledContent("不支持的文件", value: "\(unsupported.count)") }
+                } header: {
+                    Text("批量选择")
+                } footer: {
+                    Text("照片会逐个从相机下载、处理并保存到 App 下载目录和系统照片。")
+                }
+
+                if !videos.isEmpty {
+                    Section {
+                        Label(
+                            "视频不能在相机相册中直接套用效果，请先下载后从“下载”页处理。",
+                            systemImage: "video.badge.exclamationmark"
+                        )
+                        .foregroundStyle(.orange)
+                        Button("先创建 \(videos.count) 个视频下载任务") {
+                            model.enqueue(videos)
+                            onStarted()
+                            dismiss()
+                        }
+                    }
+                }
+
+                Section("LUT") {
+                    Picker("选择 LUT", selection: $selectedLUT) {
+                        Text("不使用 LUT").tag(UUID?.none)
+                        ForEach(model.luts) { entry in
+                            Text(entry.name).tag(Optional(entry.id))
+                        }
+                    }
+                    if selectedLUT != nil {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("强度")
+                                Spacer()
+                                Text("\(Int(intensity * 100))%")
+                                    .foregroundStyle(.secondary).monospacedDigit()
+                            }
+                            Slider(value: $intensity, in: 0 ... 1)
+                                .tint(palette.accent)
+                        }
+                    }
+                }
+
+                Section {
+                    Picker("选择水印", selection: $selectedWatermark) {
+                        Text("不使用水印").tag(UUID?.none)
+                        ForEach(model.watermarks) { preset in
+                            Text(preset.name).tag(Optional(preset.id))
+                        }
+                    }
+                    if let preset = selectedWatermarkPreset {
+                        LabeledContent("JPEG 输出质量", value: "\(Int(min(max(preset.quality, 0), 1) * 100))%")
+                    }
+                } header: {
+                    Text("水印")
+                } footer: {
+                    Text("选择水印时使用该预设保存的 JPEG 质量。")
+                }
+
+                Section("旋转") {
+                    Picker("旋转角度", selection: $rotation) {
+                        Text("不旋转").tag(0)
+                        Text("90°").tag(90)
+                        Text("180°").tag(180)
+                        Text("270°").tag(270)
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                if !hasEffect {
+                    Label("请至少选择 LUT、水印或旋转效果。", systemImage: "info.circle")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("批量处理")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                Button {
+                    model.exportRemoteBatch(
+                        assets: assets,
+                        lutEntry: model.luts.first { $0.id == selectedLUT },
+                        intensity: intensity,
+                        watermark: selectedWatermarkPreset,
+                        rotation: rotation
+                    )
+                    onStarted()
+                    dismiss()
+                } label: {
+                    Label("开始处理 \(photos.count) 张照片", systemImage: "wand.and.stars")
+                        .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(palette.accent)
+                .disabled(photos.isEmpty || !hasEffect || model.exportProgress != nil || model.isBusy)
+                .padding(.horizontal).padding(.vertical, 10)
+                .background(.ultraThinMaterial)
+            }
+        }
     }
 }
 

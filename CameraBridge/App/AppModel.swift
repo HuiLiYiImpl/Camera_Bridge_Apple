@@ -23,6 +23,7 @@ final class AppModel: ObservableObject {
     @Published var notice: String?
     @Published var alertMessage: String?
     @Published var exportProgress: Double? { didSet { updateIdleTimerPolicy() } }
+    @Published private(set) var remoteBatchStatus: String?
 
     let usbClient: ImageCaptureCameraClient
     private let store: AppStore
@@ -34,6 +35,9 @@ final class AppModel: ObservableObject {
     private var lutCache: [UUID: CubeLUT] = [:]
     private var lutCacheOrder: [UUID] = []
     private var thumbnailLoader: Task<Void, Never>?
+    private var remoteBatchTask: Task<Void, Never>?
+    private var remoteBatchDownloadToken: DownloadCancellationToken?
+    private var remoteBatchAssetHandle: UInt32?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var notificationObserver: NSObjectProtocol?
     private var lastNotifiedPercentage: [String: Int] = [:]
@@ -528,6 +532,284 @@ final class AppModel: ObservableObject {
             } catch { alertMessage = error.localizedDescription }
             exportProgress = nil
         }
+    }
+
+    /// Downloads selected camera images one at a time, applies the requested
+    /// effects, saves the JPEGs in Downloads, and exports them to Photos.
+    /// Videos are deliberately reported as skipped because they must first be
+    /// downloaded and processed from the Downloads screen.
+    func exportRemoteBatch(
+        assets: [PhotoAsset],
+        lutEntry: LUTEntry?,
+        intensity: Double,
+        watermark: WatermarkPreset?,
+        rotation: Int
+    ) {
+        guard remoteBatchTask == nil, exportProgress == nil else {
+            alertMessage = "已有导出任务正在运行"
+            return
+        }
+        guard downloadWorker == nil else {
+            alertMessage = "请等待当前原片下载任务完成后再批量处理"
+            return
+        }
+        guard session != nil else {
+            alertMessage = "相机连接已断开"
+            return
+        }
+
+        var seenHandles = Set<UInt32>()
+        let uniqueAssets = assets.filter { seenHandles.insert($0.handle).inserted }
+        guard !uniqueAssets.isEmpty else {
+            alertMessage = "请先选择要处理的照片"
+            return
+        }
+        let normalizedRotation = ((rotation % 360) + 360) % 360
+        guard lutEntry != nil || watermark != nil || normalizedRotation != 0 else {
+            alertMessage = "请至少选择 LUT、水印或旋转效果"
+            return
+        }
+        guard uniqueAssets.contains(where: { $0.kind == .image || $0.kind == .rawImage }) else {
+            alertMessage = "视频需先下载到本机，再从下载页应用 LUT 或水印"
+            return
+        }
+
+        exportProgress = 0
+        remoteBatchStatus = "正在准备批量处理"
+        workflow = .downloading
+        remoteBatchTask = Task { [weak self] in
+            guard let self else { return }
+            await self.processRemoteBatch(
+                assets: uniqueAssets,
+                lutEntry: lutEntry,
+                intensity: min(max(intensity, 0), 1),
+                watermark: watermark,
+                rotation: normalizedRotation
+            )
+        }
+        updateIdleTimerPolicy()
+    }
+
+    func cancelRemoteBatchExport() {
+        guard let remoteBatchTask else { return }
+        remoteBatchStatus = "正在取消批量处理"
+        remoteBatchDownloadToken?.cancel()
+        if session?.transport == .usb, let remoteBatchAssetHandle {
+            usbClient.cancelDownload(for: remoteBatchAssetHandle)
+        }
+        remoteBatchTask.cancel()
+    }
+
+    private func processRemoteBatch(
+        assets: [PhotoAsset],
+        lutEntry: LUTEntry?,
+        intensity: Double,
+        watermark: WatermarkPreset?,
+        rotation: Int
+    ) async {
+        defer {
+            remoteBatchDownloadToken = nil
+            remoteBatchAssetHandle = nil
+            remoteBatchTask = nil
+            remoteBatchStatus = nil
+            exportProgress = nil
+            if session != nil { workflow = .connected }
+            updateIdleTimerPolicy()
+        }
+
+        let loadedLUT: CubeLUT?
+        do {
+            loadedLUT = try lutEntry.map { try lut(for: $0) }
+        } catch {
+            alertMessage = "无法载入 LUT：\(error.localizedDescription)"
+            return
+        }
+
+        let processable = assets.filter { $0.kind == .image || $0.kind == .rawImage }
+        var failures = assets.compactMap { asset -> String? in
+            switch asset.kind {
+            case .video: return "\(asset.name)：视频需先下载后处理"
+            case .unknown: return "\(asset.name)：不支持的文件类型"
+            case .image, .rawImage: return nil
+            }
+        }
+        let total = processable.count
+        guard total > 0 else {
+            alertMessage = failures.joined(separator: "\n")
+            return
+        }
+
+        let suffixParts = [
+            lutEntry == nil ? nil : "LUT",
+            watermark == nil ? nil : "WM",
+            rotation == 0 ? nil : "R\(rotation)"
+        ].compactMap { $0 }
+        let suffix = suffixParts.isEmpty ? "EDIT" : suffixParts.joined(separator: "_")
+        let quality = jpegQuality(for: watermark)
+        let sessionSnapshot = session
+        var completed = 0
+        var wasCancelled = false
+
+        await diagnostics.log(
+            "REMOTE_BATCH_STARTED",
+            phase: "REMOTE_BATCH",
+            transport: sessionSnapshot?.transport,
+            message: "selected=\(assets.count) processable=\(total)"
+        )
+
+        for (index, asset) in processable.enumerated() {
+            if Task.isCancelled { wasCancelled = true; break }
+
+            let safeName = asset.name
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "\\", with: "_")
+            let sourceURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("CameraBridge-Batch-\(UUID().uuidString)-\(safeName)")
+            defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+            let stem = URL(fileURLWithPath: safeName).deletingPathExtension().lastPathComponent
+            let outputURL = store.uniqueDownloadURL(named: "\(stem)_\(suffix).jpg")
+            var outputWasAdded = false
+            let token = DownloadCancellationToken()
+            remoteBatchDownloadToken = token
+            remoteBatchAssetHandle = asset.handle
+            remoteBatchStatus = "正在下载 \(index + 1)/\(total) · \(asset.name)"
+
+            do {
+                if sessionSnapshot?.transport == .wifi {
+                    guard let wifiClient else { throw PTPError.disconnected }
+                    try await wifiClient.download(asset, to: sourceURL, cancellation: token) { [weak self] bytes, expected in
+                        Task { @MainActor [weak self] in
+                            self?.updateRemoteBatchProgress(
+                                fileCompleted: bytes,
+                                fileTotal: expected > 0 ? expected : asset.size,
+                                itemIndex: index,
+                                itemCount: total
+                            )
+                        }
+                    }
+                } else {
+                    _ = try await usbClient.download(asset, to: sourceURL) { [weak self] progress in
+                        Task { @MainActor [weak self] in
+                            self?.updateRemoteBatchProgress(
+                                fileCompleted: progress.completedBytes,
+                                fileTotal: progress.totalBytes > 0 ? progress.totalBytes : asset.size,
+                                itemIndex: index,
+                                itemCount: total
+                            )
+                        }
+                    }
+                }
+                guard !Task.isCancelled, !token.isCancelled else { throw CancellationError() }
+
+                exportProgress = (Double(index) + 0.65) / Double(total)
+                remoteBatchStatus = "正在处理 \(index + 1)/\(total) · \(asset.name)"
+                let fallbackMetadata = PhotoMetadata(
+                    cameraBrand: sessionSnapshot?.details.manufacturer,
+                    cameraModel: sessionSnapshot?.details.model ?? sessionSnapshot?.name,
+                    lensModel: sessionSnapshot?.details.lensName,
+                    iso: sessionSnapshot?.details.recentISO,
+                    shutterSpeed: sessionSnapshot?.details.recentShutter,
+                    aperture: sessionSnapshot?.details.recentAperture,
+                    focalLength: sessionSnapshot?.details.recentFocalLength,
+                    capturedAt: asset.capturedAt
+                )
+
+                try await Task.detached(priority: .userInitiated) {
+                    let data = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
+                    guard var image = UIImage(data: data) else { throw MediaProcessingError.cannotDecodeImage }
+                    let metadata = PhotoMetadataReader.read(from: data, fallback: fallbackMetadata)
+                    if let loadedLUT {
+                        image = try LUTProcessor.shared.apply(loadedLUT, to: image, intensity: intensity)
+                    }
+                    if rotation != 0 { image = image.rotated(by: rotation) }
+                    if let watermark {
+                        image = try WatermarkRenderer.shared.render(image: image, metadata: metadata, preset: watermark)
+                    }
+                    try MediaLibraryService.writeJPEG(
+                        image: image,
+                        metadata: metadata,
+                        quality: quality,
+                        to: outputURL
+                    )
+                }.value
+                guard !Task.isCancelled else { throw CancellationError() }
+
+                addEditedRecord(url: outputURL, kind: .image)
+                if downloads.count > 100 { downloads = Array(downloads.prefix(100)) }
+                outputWasAdded = true
+                completed += 1
+                exportProgress = (Double(index) + 0.90) / Double(total)
+                remoteBatchStatus = "正在写入系统照片 \(index + 1)/\(total)"
+                do {
+                    try await MediaLibraryService.saveToPhotos(fileURL: outputURL, kind: .image)
+                } catch {
+                    failures.append("\(asset.name)：已存入下载，但系统照片写入失败（\(error.localizedDescription)）")
+                }
+                exportProgress = Double(index + 1) / Double(total)
+                await diagnostics.log(
+                    "REMOTE_BATCH_ITEM_SUCCEEDED",
+                    phase: "REMOTE_BATCH",
+                    transport: sessionSnapshot?.transport,
+                    message: asset.name
+                )
+            } catch is CancellationError {
+                if !outputWasAdded { try? FileManager.default.removeItem(at: outputURL) }
+                wasCancelled = true
+                break
+            } catch PTPError.cancelled {
+                if !outputWasAdded { try? FileManager.default.removeItem(at: outputURL) }
+                wasCancelled = true
+                break
+            } catch {
+                if !outputWasAdded { try? FileManager.default.removeItem(at: outputURL) }
+                failures.append("\(asset.name)：\(error.localizedDescription)")
+                exportProgress = Double(index + 1) / Double(total)
+                await diagnostics.log(
+                    "REMOTE_BATCH_ITEM_FAILED",
+                    phase: "REMOTE_BATCH",
+                    level: "ERROR",
+                    transport: sessionSnapshot?.transport,
+                    message: asset.name,
+                    error: error
+                )
+            }
+            remoteBatchDownloadToken = nil
+            remoteBatchAssetHandle = nil
+        }
+
+        if wasCancelled {
+            notice = completed > 0 ? "已取消批量处理 · 已完成 \(completed) 个" : "已取消批量处理"
+            return
+        }
+
+        notice = failures.isEmpty
+            ? "批量处理完成 · \(completed) 个文件已存入下载和系统照片"
+            : "批量处理完成 \(completed) 个，另有 \(failures.count) 条提示"
+        if !failures.isEmpty {
+            let visible = failures.prefix(5).joined(separator: "\n")
+            let remaining = failures.count - min(failures.count, 5)
+            alertMessage = remaining > 0 ? "\(visible)\n另有 \(remaining) 项未显示" : visible
+        }
+        await diagnostics.log(
+            "REMOTE_BATCH_FINISHED",
+            phase: "REMOTE_BATCH",
+            transport: sessionSnapshot?.transport,
+            message: "completed=\(completed) notices=\(failures.count)"
+        )
+    }
+
+    private func updateRemoteBatchProgress(
+        fileCompleted: Int64,
+        fileTotal: Int64,
+        itemIndex: Int,
+        itemCount: Int
+    ) {
+        guard remoteBatchTask != nil, itemCount > 0 else { return }
+        let fraction = fileTotal > 0
+            ? min(max(Double(fileCompleted) / Double(fileTotal), 0), 1)
+            : 0
+        exportProgress = (Double(itemIndex) + fraction * 0.65) / Double(itemCount)
     }
 
     func exportBatch(
