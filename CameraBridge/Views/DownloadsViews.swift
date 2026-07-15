@@ -183,7 +183,10 @@ struct DownloadPreviewScreen: View {
                 Spacer()
                 HStack {
                     if record.kind != .video { Button { rotation = (rotation + 90) % 360 } label: { Label("旋转", systemImage: "rotate.right") } }
-                    Button { showingEdit = true } label: { Label("LUT / 水印", systemImage: "slider.horizontal.3") }
+                    Button {
+                        player?.pause()
+                        showingEdit = true
+                    } label: { Label("LUT / 水印", systemImage: "slider.horizontal.3") }
                 }
                 .buttonStyle(.bordered).padding().background(.ultraThinMaterial, in: Capsule())
             }
@@ -195,6 +198,9 @@ struct DownloadPreviewScreen: View {
         }
         .sheet(isPresented: $showingShare) { ShareSheet(items: [url]) }
         .sheet(isPresented: $showingEdit) { DownloadEditSheet(records: [record]) }
+        .onChange(of: showingEdit) { _, editing in
+            if !editing, record.kind == .video { player?.play() }
+        }
     }
 }
 
@@ -206,10 +212,38 @@ struct DownloadEditSheet: View {
     @State private var watermarkID: UUID?
     @State private var intensity = 1.0
     @State private var rotation = 0
+    @State private var previewPlayer: AVPlayer?
+    @State private var previewMessage: String?
+    @State private var compositionUpdateTask: Task<Void, Never>?
+
+    private var previewVideo: DownloadRecord? {
+        guard records.count == 1, records[0].kind == .video else { return nil }
+        return records[0]
+    }
 
     var body: some View {
         NavigationStack {
             Form {
+                if previewVideo != nil {
+                    Section("实时视频预览") {
+                        if let previewPlayer {
+                            VideoPlayer(player: previewPlayer)
+                                .frame(minHeight: 220)
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                                .onAppear { previewPlayer.play() }
+                        } else {
+                            HStack { Spacer(); ProgressView("正在准备视频"); Spacer() }
+                                .frame(minHeight: 180)
+                        }
+                        if let previewMessage {
+                            Label(previewMessage, systemImage: "exclamationmark.triangle")
+                                .font(.caption).foregroundStyle(.orange)
+                        } else {
+                            Text("预览与导出使用同一套 LUT、旋转和水印合成管线。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 Section("处理 \(records.count) 个文件") {
                     Picker("LUT", selection: $lutID) {
                         Text("无").tag(UUID?.none)
@@ -239,6 +273,71 @@ struct DownloadEditSheet: View {
             .navigationTitle("LUT 与水印").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消", action: dismiss.callAsFunction) } }
         }
+        .task(id: previewVideo?.id) { prepareVideoPreview() }
+        .onChange(of: lutID) { _, _ in scheduleCompositionUpdate() }
+        .onChange(of: watermarkID) { _, _ in scheduleCompositionUpdate() }
+        .onChange(of: intensity) { _, _ in scheduleCompositionUpdate() }
+        .onChange(of: rotation) { _, _ in scheduleCompositionUpdate() }
+        .onDisappear { stopVideoPreview() }
+    }
+
+    private func prepareVideoPreview() {
+        guard previewPlayer == nil, let record = previewVideo else { return }
+        let item = AVPlayerItem(asset: AVURLAsset(url: model.url(for: record)))
+        let player = AVPlayer(playerItem: item)
+        player.actionAtItemEnd = .pause
+        previewPlayer = player
+        updateVideoComposition()
+        player.play()
+    }
+
+    private func scheduleCompositionUpdate() {
+        guard previewVideo != nil else { return }
+        compositionUpdateTask?.cancel()
+        compositionUpdateTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            updateVideoComposition()
+        }
+    }
+
+    private func updateVideoComposition() {
+        guard let record = previewVideo, let item = previewPlayer?.currentItem else { return }
+        do {
+            let lut = try model.luts.first(where: { $0.id == lutID }).map { try model.lut(for: $0) }
+            item.videoComposition = VideoProcessor.shared.makeVideoComposition(
+                asset: item.asset,
+                lut: lut,
+                intensity: intensity,
+                rotation: rotation,
+                watermark: model.watermarks.first { $0.id == watermarkID },
+                metadata: previewMetadata(for: record)
+            )
+            previewMessage = nil
+        } catch {
+            previewMessage = "无法更新预览：\(error.localizedDescription)"
+        }
+    }
+
+    private func previewMetadata(for record: DownloadRecord) -> PhotoMetadata {
+        PhotoMetadata(
+            cameraBrand: model.session?.details.manufacturer,
+            cameraModel: model.session?.details.model ?? model.session?.name,
+            lensModel: model.session?.details.lensName,
+            iso: model.session?.details.recentISO,
+            shutterSpeed: model.session?.details.recentShutter,
+            aperture: model.session?.details.recentAperture,
+            focalLength: model.session?.details.recentFocalLength,
+            capturedAt: model.session?.details.recentCapturedAt ?? record.completedAt
+        )
+    }
+
+    private func stopVideoPreview() {
+        compositionUpdateTask?.cancel()
+        compositionUpdateTask = nil
+        previewPlayer?.pause()
+        previewPlayer?.replaceCurrentItem(with: nil)
+        previewPlayer = nil
     }
 }
 
