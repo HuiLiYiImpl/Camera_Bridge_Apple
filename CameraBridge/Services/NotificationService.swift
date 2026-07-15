@@ -129,7 +129,11 @@ final class NotificationService: NSObject, @unchecked Sendable, UNUserNotificati
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .list, .sound])
+        if notification.request.content.interruptionLevel == .passive {
+            completionHandler([.list])
+        } else {
+            completionHandler([.banner, .list, .sound])
+        }
     }
 
     func userNotificationCenter(

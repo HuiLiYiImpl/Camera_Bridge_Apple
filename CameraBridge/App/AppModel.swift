@@ -27,6 +27,7 @@ final class AppModel: ObservableObject {
     let usbClient: ImageCaptureCameraClient
     private let store: AppStore
     private let diagnostics = DiagnosticsLogger()
+    private let notifications = NotificationService.shared
     private var wifiClient: PTPIPClient?
     private var downloadWorker: Task<Void, Never>?
     private var downloadTokens: [String: DownloadCancellationToken] = [:]
@@ -34,6 +35,8 @@ final class AppModel: ObservableObject {
     private var lutCacheOrder: [UUID] = []
     private var thumbnailLoader: Task<Void, Never>?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var notificationObserver: NSObjectProtocol?
+    private var lastNotifiedPercentage: [String: Int] = [:]
     private let firstPageSize = 30
 
     init(store: AppStore = AppStore()) {
@@ -46,6 +49,14 @@ final class AppModel: ObservableObject {
         lightScenes = store.loadLightScenes()
         usbClient = ImageCaptureCameraClient()
         if downloads.count != saved.count { store.save(downloads: downloads) }
+        notificationObserver = NotificationCenter.default.addObserver(
+            forName: NotificationService.retryRequestedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let taskID = NotificationService.taskID(from: notification.userInfo ?? [:]) else { return }
+            Task { @MainActor [weak self] in self?.retryDownload(id: taskID) }
+        }
         Task { await diagnostics.log("APP_STARTED", phase: "APP_READY", message: "Camera Bridge started") }
     }
 
@@ -219,7 +230,11 @@ final class AppModel: ObservableObject {
             else { mutableKnown.insert(task.id); added.append(task); created += 1 }
         }
         downloadTasks.append(contentsOf: added)
-        if created > 0 { notice = "已创建 \(created) 个下载任务"; startDownloadWorker() }
+        if created > 0 {
+            notice = "已创建 \(created) 个下载任务"
+            Task { _ = try? await notifications.requestAuthorization() }
+            startDownloadWorker()
+        }
         if existing > 0 { alertMessage = "\(existing) 个文件已有下载任务" }
         return (created, existing)
     }
@@ -228,12 +243,16 @@ final class AppModel: ObservableObject {
         guard let index = downloadTasks.firstIndex(where: { $0.id == id }) else { return }
         switch downloadTasks[index].status {
         case .queued:
+            notifications.removeDownloadNotification(taskID: id)
+            lastNotifiedPercentage[id] = nil
             downloadTasks.remove(at: index)
         case .downloading, .cancelling:
             downloadTasks[index].status = .cancelling
             downloadTokens[id]?.cancel()
             if session?.transport == .usb { usbClient.cancelDownload(for: downloadTasks[index].asset.handle) }
         case .failed:
+            notifications.removeDownloadNotification(taskID: id)
+            lastNotifiedPercentage[id] = nil
             downloadTasks.remove(at: index)
         }
     }
@@ -245,6 +264,8 @@ final class AppModel: ObservableObject {
         downloadTasks[index].bytesPerSecond = nil
         downloadTasks[index].remainingSeconds = nil
         downloadTasks[index].errorMessage = nil
+        notifications.removeDownloadNotification(taskID: id)
+        lastNotifiedPercentage[id] = nil
         startDownloadWorker()
     }
 
@@ -296,6 +317,8 @@ final class AppModel: ObservableObject {
                 let record = DownloadRecord(name: finalURL.lastPathComponent, size: size, relativePath: finalURL.lastPathComponent, kind: task.asset.kind)
                 downloads.insert(record, at: 0)
                 if downloads.count > 100 { downloads = Array(downloads.prefix(100)) }
+                try? await notifications.notifyDownloadCompleted(taskID: task.id, fileName: task.asset.name, totalBytes: size)
+                lastNotifiedPercentage[task.id] = nil
                 downloadTasks.removeAll { $0.id == task.id }
                 if config.autoExport, [.image, .video].contains(task.asset.kind) {
                     try? await MediaLibraryService.saveToPhotos(fileURL: finalURL, kind: task.asset.kind)
@@ -304,10 +327,14 @@ final class AppModel: ObservableObject {
                 await diagnostics.log("DOWNLOAD_SUCCEEDED", phase: "DOWNLOAD", transport: session?.transport, message: task.asset.name)
             } catch is CancellationError {
                 try? FileManager.default.removeItem(at: partialURL)
+                notifications.removeDownloadNotification(taskID: task.id)
+                lastNotifiedPercentage[task.id] = nil
                 downloadTasks.removeAll { $0.id == task.id }
                 notice = "已取消下载"
             } catch PTPError.cancelled {
                 try? FileManager.default.removeItem(at: partialURL)
+                notifications.removeDownloadNotification(taskID: task.id)
+                lastNotifiedPercentage[task.id] = nil
                 downloadTasks.removeAll { $0.id == task.id }
                 notice = "已取消下载"
             } catch {
@@ -316,6 +343,12 @@ final class AppModel: ObservableObject {
                     downloadTasks[failedIndex].status = .failed
                     downloadTasks[failedIndex].errorMessage = error.localizedDescription
                 }
+                try? await notifications.notifyDownloadFailed(
+                    taskID: task.id,
+                    fileName: task.asset.name,
+                    errorMessage: error.localizedDescription
+                )
+                lastNotifiedPercentage[task.id] = nil
                 alertMessage = "下载失败：\(error.localizedDescription)"
                 await diagnostics.log("DOWNLOAD_FAILED", phase: "DOWNLOAD", level: "ERROR", transport: session?.transport, message: task.asset.name, error: error)
             }
@@ -329,6 +362,23 @@ final class AppModel: ObservableObject {
         downloadTasks[index].totalBytes = report.total
         downloadTasks[index].bytesPerSecond = report.speed
         downloadTasks[index].remainingSeconds = report.eta
+        let percentage = report.total > 0
+            ? Int((Double(report.completed) / Double(report.total) * 100).rounded(.down))
+            : 0
+        let previous = lastNotifiedPercentage[id]
+        guard previous == nil || percentage >= (previous ?? 0) + 5 || percentage >= 100 else { return }
+        lastNotifiedPercentage[id] = percentage
+        let task = downloadTasks[index]
+        Task {
+            try? await notifications.updateDownloadProgress(
+                taskID: id,
+                fileName: task.asset.name,
+                downloadedBytes: report.completed,
+                totalBytes: report.total,
+                bytesPerSecond: report.speed.map { Double($0) },
+                remainingSeconds: report.eta.map { TimeInterval($0) }
+            )
+        }
     }
 
     func url(for record: DownloadRecord) -> URL { store.url(for: record) }
