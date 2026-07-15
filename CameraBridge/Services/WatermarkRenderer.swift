@@ -1,6 +1,7 @@
 import CoreImage
 import Foundation
 import ImageIO
+import SwiftUI
 import UIKit
 
 enum MediaProcessingError: LocalizedError {
