@@ -1,13 +1,9 @@
-# Android / Gradle
-.gradle/
-.kotlin/
+.DS_Store
+DerivedData/
 build/
-**/build/
-local.properties
-*.apk
-
-# Local protocol reverse-engineering artifacts
-analysis/
-
-# ZCode AI agent artifacts
-.zcode/
+*.xcuserstate
+xcuserdata/
+.swiftpm/
+.build/
+CameraBridge.xcodeproj/
+!CameraBridge.xcodeproj/project.pbxproj

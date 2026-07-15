@@ -1,0 +1,70 @@
+name: CameraBridge
+options:
+  bundleIdPrefix: com.huiliyi
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "16.0"
+  groupSortPosition: top
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 2.0.0
+    IPHONEOS_DEPLOYMENT_TARGET: 17.0
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+targets:
+  CameraBridge:
+    type: application
+    platform: iOS
+    info:
+      path: CameraBridge/Info.plist
+      properties:
+        CFBundleDisplayName: Camera Bridge
+        LSApplicationCategoryType: public.app-category.photography
+        NSLocalNetworkUsageDescription: Camera Bridge 需要连接相机的本地 Wi-Fi 热点以浏览和传输照片。
+        NSCameraUsageDescription: Camera Bridge 需要访问通过 USB 连接的外接相机以浏览和导入照片。
+        NSPhotoLibraryAddUsageDescription: Camera Bridge 需要把下载和编辑后的照片、视频保存到系统照片图库。
+        NSPhotoLibraryUsageDescription: Camera Bridge 需要选择照片进行 LUT 与水印预览和处理。
+        UIApplicationSupportsIndirectInputEvents: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UIAppFonts:
+          - AlibabaPuHuiTi-2-45-Light.otf
+          - AlibabaPuHuiTi-2-85-Bold.otf
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UILaunchScreen: {}
+    sources:
+      - path: CameraBridge
+        excludes:
+          - Resources
+    resources:
+      - path: CameraBridge/Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.huiliyi.CameraBridge
+        PRODUCT_NAME: Camera Bridge
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+    scheme:
+      testTargets:
+        - CameraBridgeTests
+  CameraBridgeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - CameraBridgeTests
+    dependencies:
+      - target: CameraBridge
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.huiliyi.CameraBridgeTests
+        GENERATE_INFOPLIST_FILE: YES

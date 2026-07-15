@@ -1,0 +1,34 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Select simulator
+        id: simulator
+        shell: bash
+        run: |
+          DEVICE=$(xcrun simctl list devices available -j | ruby -rjson -e 'j=JSON.parse(STDIN.read); puts j["devices"].values.flatten.find { |d| d["name"].start_with?("iPhone") }["name"]')
+          echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
+      - name: Build and test
+        run: >-
+          xcodebuild
+          -project CameraBridge.xcodeproj
+          -scheme CameraBridge
+          -destination 'platform=iOS Simulator,name=${{ steps.simulator.outputs.device }}'
+          -configuration Debug
+          CODE_SIGNING_ALLOWED=NO
+          test

@@ -1,96 +1,67 @@
-# Camera_Bridge
+# Camera Bridge for Apple
 
-面向 Android 的尼康相机照片与视频桥接工具，支持 **Wi‑Fi (PTP/IP)** 与 **USB (MTP)** 两种连接方式，提供原片浏览、任务下载、LUT 调色、水印和视频导出功能。
-
-## v1.0.5 更新
-
-- 下载改为任务队列：缩略图实时显示进度、已下载大小、剩余大小与预计时间，支持取消、失败重试和重复任务拦截
-- 修复 USB 模式视频传输与进度统计，照片和视频均可稳定保存到系统媒体库
-- LUT 支持 `.cube`、Hald CLUT `.png` 和 `.xmp` 导入，使用 GPU 实时预览并支持强度调节
-- 照片 LUT 导出减少重复解码、内存复制与临时文件写入
-- 视频支持全屏播放、声音、LUT 实时预览、旋转和硬件加速导出，导出时保留音轨
-- 新增可折叠的侧边 LUT 列表、批量 LUT/水印处理和屏幕灯光工具
+Camera Bridge 是使用 **SwiftUI、Network、Core Image、AVFoundation、PhotoKit** 重写的原生 iPhone / iPad 相机桥接工具。它保留原 Android 版本的 Nikon PTP/IP 浏览与下载协议，以及相册、下载队列、LUT、水印、视频导出、屏幕灯光和诊断能力。
 
 ## 功能
 
-### 连接
-- **Wi‑Fi 连接**：连接页三步操作指引（连接智能设备 → AP mode → 建立 Wi-Fi 连接）
-- **USB 连接**：即插即用，通过 USB 数据线直接连接相机（需要手机支持 USB OTG）
-- 记住上次连接的相机 Wi-Fi，连不上时自动跳转系统 Wi-Fi 设置
-- 前台服务保持 Wi-Fi 连接不断开，Wi-Fi 锁防止息屏时相机热点休眠
-- USB 诊断工具（设置页查看设备详细信息）
+- Nikon Wi-Fi (PTP/IP) 连接，读取设备、镜头、电量与媒体信息
+- 分页相册、JPG / RAW / 视频筛选、缩略图、原图预览与多选下载
+- 自适应 1–8 MiB 分块、失败退避、取消、重试、速度和 ETA
+- 下载文件保存在 App 的 Documents/CameraBridge，并可自动加入系统照片图库
+- `.cube`、Hald CLUT `.png` 与 Adobe `.xmp` LUT 导入
+- Core Image 实时照片预览，AVFoundation 视频预览与硬件导出
+- EXIF 水印模板、批量 LUT / 水印处理和系统分享
+- 单色、双色、四区屏幕灯光场景，亮度控制与本地保存
+- 连接/下载诊断日志导出
+- 暗房橙、尼康黄、专业灰、深海蓝四套主题
 
-### 相册
-- 按格式分类筛选（全部 / JPG / RAW / 视频）
-- 多选批量下载
-- 照片预览：双指缩放、拖拽、逆时针旋转
-- 查看原图（从相机下载全分辨率）
-- 预览内直接下载原图
-- 分页加载，底部进度提示
+## 平台说明
 
-### 下载
-- 相册页创建下载任务，下载页展示缩略图与环形进度
-- 实时显示已下载大小、剩余大小、速度与预计时间
-- 支持取消任务、失败重试和重复下载提示，取消不会断开相机连接
-- 下载页查看高清原图与视频（从本地加载，无需联网）
-- 多选分享（QQ / 微信等系统分享面板）
-- 多选删除（带二次确认）
-- 按格式分类筛选（全部 / JPG / RAW / 视频）
-- 下载通知进度条（实时百分比 + 进度条）
-- 下载失败通知栏一键重试
+Apple 版同时使用 Nikon Wi-Fi PTP/IP 和 `ImageCaptureCore` 外接相机接口。USB 模式通过 `ICDeviceBrowser`、`ICCameraDevice` 与 `ICCameraFile` 浏览和下载相机媒体，不依赖私有 USB API；具体 Nikon 机型、线缆和相机 USB 模式仍需真机验证。`ExternalAccessory` 不是通用相机 MTP/PTP 接口，因此本项目不使用它。
 
-### LUT 与导出
-- 导入 `.cube`、Hald CLUT `.png` 与 `.xmp` LUT
-- GPU 实时预览，照片支持 LUT 强度调节、缩放与旋转
-- 照片支持 LUT、水印及二者组合导出，可批量处理
-- 视频支持全屏有声播放、LUT 预览、旋转与硬件加速导出
-- LUT 侧边栏可滚动、收起与展开
+iOS 也不允许第三方 App 永久锁定相机 Wi-Fi 或在后台无限维持任意 TCP 连接。Camera Bridge 会在前台和有限后台任务期内保持传输，并在回到前台时检查会话。
 
-### 其他
-- 动态 chunk 拥塞控制提升下载速度
-- 下载后自动保存到系统相册
-- 暗色主题（Bridge Night 配色）
-- 水印叠加（EXIF 信息水印，可自定义位置与样式）
-- 屏幕灯光：创建、保存和播放灯光场景
+## 构建
 
-## Android 构建
+要求：macOS、Xcode 16+、XcodeGen。
 
 ```bash
-./gradlew :app:assembleDebug
+brew install xcodegen
+./scripts/bootstrap.sh
 ```
 
-生成的 APK：
+也可以直接运行：
+
+```bash
+xcodegen generate
+xcodebuild -project CameraBridge.xcodeproj \
+  -scheme CameraBridge \
+  -destination 'platform=iOS Simulator,name=iPhone 16' \
+  CODE_SIGNING_ALLOWED=NO test
+```
+
+真机运行前，在 Xcode 的 Signing & Capabilities 中选择自己的 Team。首次连接时允许“本地网络”权限，并先在系统设置中加入相机创建的 Wi-Fi 热点。
+
+## 使用
+
+1. 在 Nikon 相机中选择“连接到智能设备”并启用 AP mode。
+2. 在 iPhone / iPad 的 Wi-Fi 设置中加入相机热点。
+3. 打开 Camera Bridge，默认地址 `192.168.1.1:15740`，点击“建立 Wi-Fi 连接”。
+4. 进入“照片”分页浏览、预览和创建下载任务。
+5. 在“下载”页分享、删除或对本地媒体应用 LUT / 水印。
+
+## 工程结构
 
 ```text
-App/build/outputs/apk/debug/app-debug.apk
+CameraBridge/App            App 入口与全局模型
+CameraBridge/Models         领域模型与持久化数据
+CameraBridge/Services       PTP/IP、下载、LUT、水印、视频、诊断
+CameraBridge/Views          SwiftUI 页面与组件
+CameraBridge/Resources      App 图标和品牌素材
+CameraBridgeTests           协议、解析与模型测试
+project.yml                 XcodeGen 工程定义
 ```
 
-## 使用方法
+## 已知硬件测试状态
 
-### Wi‑Fi 连接
-1. 在相机上开启 Wi‑Fi 热点（连接到智能设备 → AP mode）。
-2. 手机连接相机 Wi‑Fi 热点。
-3. 打开 Camera_Bridge，点击「开始建立连接」。
-4. 连接成功后可浏览、预览和下载照片。
-
-### USB 连接
-1. 用 USB 数据线将相机连接到手机（相机需开启 MTP 模式）。
-2. 打开 Camera_Bridge，自动检测 USB 相机。
-3. 授予 USB 权限后即可浏览和下载照片。
-
-> 小米设备建议将 Camera_Bridge 的电池策略设置为「无限制」，并关闭 WLAN 助理的自动切网功能。
-
-## 已测试机型
-
-| 设备 | 相机 | 连接方式 | 状态 |
-|------|------|---------|------|
-| 小米 14 | 尼康 Zf | Wi‑Fi (PTP/IP) | ✅ 通过 |
-| 小米 14 | 尼康 Zf | USB (MTP) | ✅ 通过 |
-
-## 目录
-
-```text
-App/src/main/java/   Kotlin 与 Jetpack Compose Android 源码
-App/src/main/res/     Android 资源
-gradle/               Gradle Wrapper
-```
+原协议实现已在 Android 版用 Nikon Zf 验证。Apple 重写保留相同的 PTP/IP 初始化 GUID、操作码、分页顺序与自适应分块策略；仍建议在 Nikon Zf 真机热点上完成一次端到端验收后再发布 App Store。
