@@ -194,8 +194,9 @@ struct PhotoPreviewScreen: View {
             }
         }
         .task { await loadOriginal() }
-        .onChange(of: selectedLUT) { _, _ in renderLUTPreview() }
-        .onChange(of: intensity) { _, _ in renderLUTPreview() }
+        .onChange(of: selectedLUT) { _, _ in renderPreview() }
+        .onChange(of: selectedWatermark) { _, _ in renderPreview() }
+        .onChange(of: intensity) { _, _ in renderPreview() }
     }
 
     private var editorDrawer: some View {
@@ -237,15 +238,28 @@ struct PhotoPreviewScreen: View {
         loading = false
     }
 
-    private func renderLUTPreview() {
+    private func renderPreview() {
         renderTask?.cancel()
         guard let original else { return }
-        guard let entry = model.luts.first(where: { $0.id == selectedLUT }) else { preview = original; return }
+        let entry = model.luts.first(where: { $0.id == selectedLUT })
+        let watermark = model.watermarks.first(where: { $0.id == selectedWatermark })
+        guard entry != nil || watermark != nil else { preview = original; return }
         do {
-            let lut = try model.lut(for: entry)
+            let lut = try entry.map { try model.lut(for: $0) }
             let amount = intensity
+            let metadata = PhotoMetadata(
+                cameraBrand: model.session?.details.manufacturer,
+                cameraModel: model.session?.details.model ?? model.session?.name,
+                lensModel: model.session?.details.lensName,
+                capturedAt: asset.capturedAt
+            )
             renderTask = Task {
-                let rendered = try? await Task.detached { try LUTProcessor.shared.apply(lut, to: original, intensity: amount) }.value
+                let rendered = try? await Task.detached {
+                    var image = original
+                    if let lut { image = try LUTProcessor.shared.apply(lut, to: image, intensity: amount) }
+                    if let watermark { image = try WatermarkRenderer.shared.render(image: image, metadata: metadata, preset: watermark) }
+                    return image
+                }.value
                 if !Task.isCancelled { preview = rendered ?? original }
             }
         } catch { model.alertMessage = error.localizedDescription }
