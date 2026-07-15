@@ -232,11 +232,31 @@ private struct WatermarkEditorSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var draft: WatermarkPreset
+    @State private var photoItem: PhotosPickerItem?
+    @State private var sampleImage: UIImage?
+    @State private var renderedPreview: UIImage?
+    @State private var renderTask: Task<Void, Never>?
+    @State private var showingLogoImporter = false
     init(preset: WatermarkPreset) { _draft = State(initialValue: preset) }
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("实时预览") {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.12)).aspectRatio(16 / 10, contentMode: .fit)
+                        if let image = renderedPreview ?? sampleImage {
+                            Image(uiImage: image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 12))
+                        } else {
+                            PhotosPicker(selection: $photoItem, matching: .images) {
+                                Label("选择照片预览模板", systemImage: "photo.badge.plus")
+                            }
+                        }
+                    }
+                    if sampleImage != nil {
+                        PhotosPicker(selection: $photoItem, matching: .images) { Label("更换预览照片", systemImage: "photo") }
+                    }
+                }
                 Section("模板") {
                     TextField("名称", text: $draft.name)
                     Picker("布局", selection: $draft.layout) { ForEach(WatermarkLayout.allCases) { Text($0.title).tag($0) } }
@@ -250,6 +270,8 @@ private struct WatermarkEditorSheet: View {
                     }
                 }
                 Section("样式") {
+                    ColorPicker("文字颜色", selection: Binding(get: { draft.textColor.color }, set: { draft.textColor = $0.argb }), supportsOpacity: true)
+                    ColorPicker("背景颜色", selection: Binding(get: { draft.backgroundColor.color }, set: { draft.backgroundColor = $0.argb }), supportsOpacity: true)
                     Stepper("字号 \(Int(draft.fontSize))", value: $draft.fontSize, in: 16 ... 80)
                     Stepper("边距 \(Int(draft.margin))", value: $draft.margin, in: 0 ... 100)
                     Toggle("白色边框", isOn: $draft.frameEnabled)
@@ -259,6 +281,10 @@ private struct WatermarkEditorSheet: View {
                         Toggle("自动使用品牌 Logo", isOn: $draft.useBrandLogo)
                         Slider(value: $draft.logoScale, in: 0.4 ... 2) { Text("Logo 大小") }
                         Slider(value: $draft.logoAlpha, in: 0.1 ... 1) { Text("Logo 透明度") }
+                        Button { showingLogoImporter = true } label: { Label("导入自定义 Logo", systemImage: "photo.badge.plus") }
+                        if draft.logoName != nil {
+                            Button("移除自定义 Logo", role: .destructive) { draft.logoName = nil }
+                        }
                     }
                     Slider(value: $draft.backgroundAlpha, in: 0 ... 1) { Text("背景透明度") }
                     Slider(value: $draft.quality, in: 0.5 ... 1) { Text("输出质量") }
@@ -273,6 +299,57 @@ private struct WatermarkEditorSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("取消", action: dismiss.callAsFunction) }
                 ToolbarItem(placement: .confirmationAction) { Button("保存") { model.saveWatermark(draft); dismiss() }.disabled(draft.name.trimmingCharacters(in: .whitespaces).isEmpty) }
             }
+            .fileImporter(isPresented: $showingLogoImporter, allowedContentTypes: [.image]) { result in
+                if case .success(let url) = result { importLogo(from: url) }
+                else if case .failure(let error) = result { model.alertMessage = error.localizedDescription }
+            }
+            .onChange(of: photoItem) { _, item in loadPreviewPhoto(from: item) }
+            .onChange(of: draft) { _, _ in renderPreview() }
+            .onDisappear { renderTask?.cancel() }
+        }
+    }
+
+    private func loadPreviewPhoto(from item: PhotosPickerItem?) {
+        Task {
+            guard let data = try? await item?.loadTransferable(type: Data.self), let image = UIImage(data: data) else { return }
+            sampleImage = image
+            renderPreview()
+        }
+    }
+
+    private func renderPreview() {
+        renderTask?.cancel()
+        guard let sampleImage else { renderedPreview = nil; return }
+        let preset = draft
+        let metadata = PhotoMetadata(
+            cameraBrand: "Nikon", cameraModel: "Z f", lensModel: "NIKKOR Z 40mm f/2",
+            iso: 100, shutterSpeed: "1/250s", aperture: "f/2.8", focalLength: "40mm",
+            equivalentFocalLength: "40mm", capturedAt: .now, customText: preset.customText,
+            copyrightText: preset.copyrightText
+        )
+        renderTask = Task {
+            let rendered = try? await Task.detached {
+                try WatermarkRenderer.shared.render(image: sampleImage, metadata: metadata, preset: preset)
+            }.value
+            if !Task.isCancelled { renderedPreview = rendered ?? sampleImage }
+        }
+    }
+
+    private func importLogo(from source: URL) {
+        let scoped = source.startAccessingSecurityScopedResource()
+        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        do {
+            let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("WatermarkLogos", isDirectory: true)
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            let ext = source.pathExtension.isEmpty ? "png" : source.pathExtension
+            let destination = base.appendingPathComponent("\(UUID().uuidString).\(ext)")
+            try FileManager.default.copyItem(at: source, to: destination)
+            draft.logoName = destination.path
+            draft.useBrandLogo = false
+            draft.logoEnabled = true
+        } catch {
+            model.alertMessage = error.localizedDescription
         }
     }
 }

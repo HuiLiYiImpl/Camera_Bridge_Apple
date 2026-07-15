@@ -182,7 +182,10 @@ final class WatermarkRenderer: @unchecked Sendable {
     }
 
     private func logoImage(metadata: PhotoMetadata, preset: WatermarkPreset) -> UIImage? {
-        if let logoName = preset.logoName, let image = UIImage(named: logoName) { return image }
+        if let logoName = preset.logoName {
+            if let image = UIImage(named: logoName) { return image }
+            if FileManager.default.fileExists(atPath: logoName), let image = UIImage(contentsOfFile: logoName) { return image }
+        }
         guard preset.useBrandLogo, let brand = metadata.cameraBrand?.lowercased() else { return nil }
         let mapping: [(String, String)] = [
             ("nikon", "wm_nikon"), ("canon", "wm_canon"), ("sony", "wm_sony"),
