@@ -30,6 +30,7 @@ enum ImageCaptureConnectionState: Equatable {
 }
 
 enum ImageCaptureCameraError: LocalizedError {
+    case simulatorUnavailable
     case authorizationDenied
     case authorizationRestricted
     case noCamera
@@ -44,6 +45,8 @@ enum ImageCaptureCameraError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .simulatorUnavailable:
+            "iOS 模拟器不提供 ImageCaptureCore 外接相机发现，请在 iPhone 或 iPad 真机上验证 USB。"
         case .authorizationDenied:
             "未获得外接相机访问权限，请在系统设置中允许 Camera Bridge 访问相机。"
         case .authorizationRestricted:
@@ -77,6 +80,14 @@ enum ImageCaptureCameraError: LocalizedError {
 /// the published state or call the async methods directly.
 @MainActor
 final class ImageCaptureCameraClient: NSObject, ObservableObject {
+    static var supportsDiscovery: Bool {
+#if targetEnvironment(simulator)
+        false
+#else
+        true
+#endif
+    }
+
     @Published private(set) var connectionState: ImageCaptureConnectionState = .idle
     @Published private(set) var authorizationStatus: ICAuthorizationStatus = .notDetermined
     @Published private(set) var discoveredCameras: [ImageCaptureCameraDescriptor] = []
@@ -102,6 +113,7 @@ final class ImageCaptureCameraClient: NSObject, ObservableObject {
     // MARK: - Discovery and session lifecycle
 
     func startDiscovery() async throws {
+        guard Self.supportsDiscovery else { throw ImageCaptureCameraError.simulatorUnavailable }
         let status = await browser.requestContentsAuthorization()
         authorizationStatus = status
 
@@ -385,7 +397,6 @@ final class ImageCaptureCameraClient: NSObject, ObservableObject {
         let deadline = Date().addingTimeInterval(15)
         while camera.hasOpenSession,
               camera.contentCatalogPercentCompleted < 100,
-              camera.mediaFiles == nil,
               Date() < deadline {
             try? await Task<Never, Never>.sleep(nanoseconds: 200_000_000)
         }

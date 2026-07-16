@@ -28,7 +28,7 @@ struct GalleryScreen: View {
                             PhotoAssetCell(asset: asset, image: model.thumbnails[asset.handle], selected: selected.contains(asset.handle))
                                 .onAppear {
                                     model.loadThumbnail(for: asset)
-                                    if filter == .all, asset.id == filtered.last?.id { model.loadMorePhotos() }
+                                    if asset.id == filtered.last?.id { model.loadMorePhotos() }
                                 }
                                 .onTapGesture { tap(asset) }
                                 .onLongPressGesture { selected.insert(asset.handle) }
@@ -39,6 +39,7 @@ struct GalleryScreen: View {
                             HStack { if model.isBusy { ProgressView() }; Text("加载更多") }
                                 .frame(maxWidth: .infinity).padding()
                         }
+                        .onAppear { Task { await loadNextPageForCurrentFilter() } }
                     }
                     Spacer(minLength: selected.isEmpty ? 80 : 150)
                 }
@@ -66,6 +67,7 @@ struct GalleryScreen: View {
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
+        .task(id: filter) { await loadUntilFilterCanRender() }
     }
 
     private var filterBar: some View {
@@ -135,6 +137,29 @@ struct GalleryScreen: View {
         if selected.isEmpty { preview = asset }
         else if selected.contains(asset.handle) { selected.remove(asset.handle) }
         else { selected.insert(asset.handle) }
+    }
+
+    private func loadUntilFilterCanRender() async {
+        guard filter != .all else { return }
+        var previousCount = -1
+        while !Task.isCancelled,
+              model.session != nil,
+              model.hasMorePhotos,
+              filtered.isEmpty,
+              model.photos.count != previousCount {
+            previousCount = model.photos.count
+            await model.loadPhotos(reset: false)
+        }
+    }
+
+    private func loadNextPageForCurrentFilter() async {
+        guard model.hasMorePhotos else { return }
+        let previousMatchCount = filtered.count
+        repeat {
+            let previousTotal = model.photos.count
+            await model.loadPhotos(reset: false)
+            if model.photos.count == previousTotal { break }
+        } while !Task.isCancelled && model.hasMorePhotos && filter != .all && filtered.count == previousMatchCount
     }
 }
 

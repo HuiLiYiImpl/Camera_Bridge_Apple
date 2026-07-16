@@ -39,6 +39,12 @@ struct DownloadsScreen: View {
                 Spacer(minLength: selected.isEmpty ? 80 : 150)
             }
             if !selected.isEmpty { selectionBar }
+            if let progress = model.exportProgress {
+                VStack(spacing: 8) {
+                    ProgressView(value: progress).tint(palette.accent)
+                    Text("正在导出 · \(Int(progress * 100))%").font(.caption.bold())
+                }.padding().background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16)).padding()
+            }
         }
         .navigationTitle("下载")
         .toolbarBackground(palette.night, for: .navigationBar)
@@ -93,6 +99,7 @@ private struct DownloadTaskCard: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.bridgePalette) private var palette
     let task: DownloadTaskModel
+    @State private var confirmCancel = false
 
     var body: some View {
         HStack(spacing: 13) {
@@ -100,17 +107,27 @@ private struct DownloadTaskCard: View {
                 RoundedRectangle(cornerRadius: 12).fill(palette.surface).frame(width: 66, height: 66)
                 if let image = model.thumbnails[task.asset.handle] { Image(uiImage: image).resizable().scaledToFill().frame(width: 66, height: 66).clipShape(RoundedRectangle(cornerRadius: 12)) }
                 else { Image(systemName: task.asset.kind == .video ? "video" : "photo") }
+                Circle().fill(.black.opacity(0.46)).frame(width: 50, height: 50)
                 Circle().stroke(palette.text.opacity(0.18), lineWidth: 4).frame(width: 48, height: 48)
-                Circle().trim(from: 0, to: task.progress).stroke(palette.accent, style: StrokeStyle(lineWidth: 4, lineCap: .round)).rotationEffect(.degrees(-90)).frame(width: 48, height: 48)
+                if task.totalBytes > 0 {
+                    Circle().trim(from: 0, to: task.progress).stroke(palette.accent, style: StrokeStyle(lineWidth: 4, lineCap: .round)).rotationEffect(.degrees(-90)).frame(width: 48, height: 48)
+                } else if task.status == .downloading {
+                    ProgressView().tint(palette.accent)
+                }
+                Text(progressLabel).font(.caption2.bold()).foregroundStyle(.white).monospacedDigit()
             }
             VStack(alignment: .leading, spacing: 5) {
                 Text(task.asset.name).font(.subheadline.bold()).lineLimit(1)
                 if task.status == .failed { Text(task.errorMessage ?? "下载失败").font(.caption).foregroundStyle(.red).lineLimit(2) }
                 else {
-                    Text("\(task.downloadedBytes.byteCountText) / \(task.totalBytes.byteCountText)").font(.caption).foregroundStyle(.secondary)
+                    Text(transferSizeText).font(.caption).foregroundStyle(.secondary)
                     HStack {
-                        Text(task.bytesPerSecond.map { "\($0.byteCountText)/s" } ?? "等待中")
-                        Text(task.remainingSeconds.map(etaText) ?? "计算中")
+                        Text(statusText)
+                        if task.status == .downloading {
+                            Text(task.bytesPerSecond.map { "\($0.byteCountText)/s" } ?? "测速中")
+                            if task.totalBytes > 0 { Text("剩余 \(max(task.totalBytes - task.downloadedBytes, 0).byteCountText)") }
+                            Text(task.totalBytes > 0 ? task.remainingSeconds.map(etaText) ?? "计算中" : "剩余时间未知")
+                        }
                     }.font(.caption2).foregroundStyle(.secondary)
                 }
             }
@@ -118,10 +135,41 @@ private struct DownloadTaskCard: View {
             if task.status == .failed {
                 Button { model.retryDownload(id: task.id) } label: { Image(systemName: "arrow.clockwise") }
             } else {
-                Button { model.cancelDownload(id: task.id) } label: { Image(systemName: "xmark.circle") }
+                Button { confirmCancel = true } label: { Image(systemName: "xmark.circle") }
+                    .disabled(task.status == .cancelling)
             }
         }
         .foregroundStyle(palette.text).bridgeCard()
+        .confirmationDialog("取消这个下载任务？", isPresented: $confirmCancel, titleVisibility: .visible) {
+            Button("取消下载", role: .destructive) { model.cancelDownload(id: task.id) }
+            Button("继续下载", role: .cancel) {}
+        } message: {
+            Text("取消只会停止当前任务，不会断开相机；队列中的后续任务会继续执行。")
+        }
+    }
+
+    private var progressLabel: String {
+        switch task.status {
+        case .queued: "等待"
+        case .cancelling: "取消中"
+        case .failed: "失败"
+        case .downloading: task.totalBytes > 0 ? "\(Int(task.progress * 100))%" : "传输"
+        }
+    }
+
+    private var transferSizeText: String {
+        task.totalBytes > 0
+            ? "\(task.downloadedBytes.byteCountText) / \(task.totalBytes.byteCountText)"
+            : "已下载 \(task.downloadedBytes.byteCountText) · 总大小未知"
+    }
+
+    private var statusText: String {
+        switch task.status {
+        case .queued: "等待中"
+        case .downloading: "下载中"
+        case .cancelling: "正在取消"
+        case .failed: "下载失败"
+        }
     }
 
     private func etaText(_ seconds: Int) -> String {

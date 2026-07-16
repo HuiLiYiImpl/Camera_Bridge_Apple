@@ -9,6 +9,7 @@ enum MediaProcessingError: LocalizedError {
     case cannotWriteImage
     case photoLibraryDenied
     case videoExportFailed(String)
+    case insufficientStorage(required: Int64, available: Int64)
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +17,8 @@ enum MediaProcessingError: LocalizedError {
         case .cannotWriteImage: "无法写入图片"
         case .photoLibraryDenied: "未获得系统照片图库写入权限"
         case .videoExportFailed(let message): "视频导出失败：\(message)"
+        case .insufficientStorage(let required, let available):
+            "存储空间不足：导出约需 \(required.byteCountText)，当前可用 \(available.byteCountText)"
         }
     }
 }

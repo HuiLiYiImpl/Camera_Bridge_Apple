@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 import UIKit
@@ -8,6 +9,10 @@ final class AppModel: ObservableObject {
         didSet {
             store.save(config: config)
             updateIdleTimerPolicy()
+            if config.usbAutoRead != oldValue.usbAutoRead, ImageCaptureCameraClient.supportsDiscovery {
+                if config.usbAutoRead { startUSBDiscovery() }
+                else if session?.transport != .usb { usbClient.stopDiscovery() }
+            }
         }
     }
     @Published private(set) var workflow: Workflow = .waiting
@@ -22,7 +27,12 @@ final class AppModel: ObservableObject {
     @Published var lightScenes: [LightScene] { didSet { store.save(lightScenes: lightScenes) } }
     @Published var notice: String?
     @Published var alertMessage: String?
-    @Published var exportProgress: Double? { didSet { updateIdleTimerPolicy() } }
+    @Published var exportProgress: Double? {
+        didSet {
+            updateIdleTimerPolicy()
+            if exportProgress == nil, downloadWorker == nil { endBackgroundTask() }
+        }
+    }
     @Published private(set) var remoteBatchStatus: String?
 
     let usbClient: ImageCaptureCameraClient
@@ -35,12 +45,16 @@ final class AppModel: ObservableObject {
     private var lutCache: [UUID: CubeLUT] = [:]
     private var lutCacheOrder: [UUID] = []
     private var thumbnailLoader: Task<Void, Never>?
+    private var thumbnailPending: [UInt32: PhotoAsset] = [:]
+    private var photoCatalogLoading = false
     private var remoteBatchTask: Task<Void, Never>?
     private var remoteBatchDownloadToken: DownloadCancellationToken?
     private var remoteBatchAssetHandle: UInt32?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var notificationObserver: NSObjectProtocol?
     private var lastNotifiedPercentage: [String: Int] = [:]
+    private var lastNotifiedUnknownBytes: [String: Int64] = [:]
+    private var usbCancellables = Set<AnyCancellable>()
     private let firstPageSize = 30
 
     init(store: AppStore = AppStore()) {
@@ -52,6 +66,19 @@ final class AppModel: ObservableObject {
         watermarks = store.loadWatermarks()
         lightScenes = store.loadLightScenes()
         usbClient = ImageCaptureCameraClient()
+        usbClient.$discoveredCameras
+            .dropFirst()
+            .sink { [weak self] cameras in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          self.config.usbAutoRead,
+                          self.session == nil,
+                          !self.isBusy,
+                          let first = cameras.first else { return }
+                    self.connectUSB(first)
+                }
+            }
+            .store(in: &usbCancellables)
         if downloads.count != saved.count { store.save(downloads: downloads) }
         notificationObserver = NotificationCenter.default.addObserver(
             forName: NotificationService.retryRequestedNotification,
@@ -62,11 +89,15 @@ final class AppModel: ObservableObject {
             Task { @MainActor [weak self] in self?.retryDownload(id: taskID) }
         }
         Task { await diagnostics.log("APP_STARTED", phase: "APP_READY", message: "Camera Bridge started") }
+        if config.usbAutoRead, ImageCaptureCameraClient.supportsDiscovery { startUSBDiscovery() }
     }
 
     var isBusy: Bool { workflow.busy }
     var isConnected: Bool { session != nil }
     var activeDownloadCount: Int { downloadTasks.filter { $0.status != .failed }.count }
+    private var currentSourceID: String? {
+        session.map { "\($0.transport.rawValue)|\($0.details.serialNumber ?? $0.name)|\($0.host):\($0.port)" }
+    }
 
     func connectWiFi() {
         guard !workflow.busy else { return }
@@ -130,6 +161,9 @@ final class AppModel: ObservableObject {
             else { await usbClient.disconnect() }
             session = nil
             photos.removeAll()
+            thumbnailLoader?.cancel()
+            thumbnailLoader = nil
+            thumbnailPending.removeAll()
             thumbnails.removeAll()
             hasMorePhotos = false
             workflow = .waiting
@@ -149,6 +183,10 @@ final class AppModel: ObservableObject {
 
     func loadPhotos(reset: Bool) async {
         guard let session else { return }
+        while photoCatalogLoading, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(30)) }
+        guard !Task.isCancelled, self.session == session else { return }
+        photoCatalogLoading = true
+        defer { photoCatalogLoading = false }
         workflow = .loading
         notice = reset ? "正在读取相机相册" : "正在加载更多"
         do {
@@ -167,7 +205,8 @@ final class AppModel: ObservableObject {
                 page = try usbClient.assets(offset: offset, limit: limit)
                 hasMore = usbClient.hasMoreAssets(after: offset + page.count)
             }
-            photos = reset ? page : photos + page
+            guard self.session == session else { return }
+            photos = reset ? page : photos + page.filter { item in !photos.contains(where: { $0.id == item.id }) }
             hasMorePhotos = hasMore
             workflow = .connected
             notice = hasMore ? "已读取 \(photos.count) 个文件" : "已全部读取 · \(photos.count) 个文件"
@@ -184,16 +223,30 @@ final class AppModel: ObservableObject {
     }
 
     private func loadMissingThumbnails(_ assets: [PhotoAsset]) {
-        let pending = assets.filter { thumbnails[$0.handle] == nil }
-        guard !pending.isEmpty, thumbnailLoader == nil else { return }
+        guard let sourceID = currentSourceID else { return }
+        if config.thumbnailCacheEnabled {
+            for asset in assets where thumbnails[asset.handle] == nil {
+                if let data = store.cachedThumbnail(for: asset, sourceID: sourceID), let image = UIImage(data: data) {
+                    thumbnails[asset.handle] = image
+                }
+            }
+        }
+        for asset in assets where thumbnails[asset.handle] == nil { thumbnailPending[asset.handle] = asset }
+        guard thumbnailLoader == nil, !thumbnailPending.isEmpty else { return }
         thumbnailLoader = Task {
             defer { thumbnailLoader = nil }
-            for asset in pending where !Task.isCancelled {
+            while !thumbnailPending.isEmpty, !Task.isCancelled {
+                guard currentSourceID == sourceID, let asset = thumbnailPending.values.first else { break }
+                thumbnailPending[asset.handle] = nil
                 do {
                     let data: Data?
                     if session?.transport == .wifi { data = try await wifiClient?.thumbnail(for: asset) }
                     else { data = try await usbClient.thumbnail(for: asset) }
-                    if let data, let image = UIImage(data: data) { thumbnails[asset.handle] = image }
+                    if let data, let image = UIImage(data: data) {
+                        thumbnails[asset.handle] = image
+                        guard currentSourceID == sourceID else { break }
+                        if config.thumbnailCacheEnabled { store.cacheThumbnail(data, for: asset, sourceID: sourceID) }
+                    }
                 } catch {
                     await diagnostics.log("THUMBNAIL_FAILED", phase: "THUMBNAIL", level: "WARN", transport: session?.transport, message: asset.name, error: error)
                 }
@@ -229,7 +282,7 @@ final class AppModel: ObservableObject {
         var added: [DownloadTaskModel] = []
         var mutableKnown = known
         for asset in assets {
-            let task = DownloadTaskModel(asset: asset, sessionName: session.name)
+            let task = DownloadTaskModel(asset: asset, sourceID: currentSourceID ?? session.name)
             if mutableKnown.contains(task.id) { existing += 1 }
             else { mutableKnown.insert(task.id); added.append(task); created += 1 }
         }
@@ -249,6 +302,7 @@ final class AppModel: ObservableObject {
         case .queued:
             notifications.removeDownloadNotification(taskID: id)
             lastNotifiedPercentage[id] = nil
+            lastNotifiedUnknownBytes[id] = nil
             downloadTasks.remove(at: index)
         case .downloading, .cancelling:
             downloadTasks[index].status = .cancelling
@@ -257,12 +311,14 @@ final class AppModel: ObservableObject {
         case .failed:
             notifications.removeDownloadNotification(taskID: id)
             lastNotifiedPercentage[id] = nil
+            lastNotifiedUnknownBytes[id] = nil
             downloadTasks.remove(at: index)
         }
     }
 
     func retryDownload(id: String) {
         guard let index = downloadTasks.firstIndex(where: { $0.id == id }), downloadTasks[index].status == .failed else { return }
+        guard downloadTasks[index].sourceID == currentSourceID else { alertMessage = "请重新连接创建该任务时的相机后再重试"; return }
         downloadTasks[index].status = .queued
         downloadTasks[index].downloadedBytes = 0
         downloadTasks[index].bytesPerSecond = nil
@@ -270,6 +326,7 @@ final class AppModel: ObservableObject {
         downloadTasks[index].errorMessage = nil
         notifications.removeDownloadNotification(taskID: id)
         lastNotifiedPercentage[id] = nil
+        lastNotifiedUnknownBytes[id] = nil
         startDownloadWorker()
     }
 
@@ -283,12 +340,13 @@ final class AppModel: ObservableObject {
         defer {
             downloadWorker = nil
             updateIdleTimerPolicy()
+            if exportProgress == nil { endBackgroundTask() }
             if session != nil { workflow = .connected }
         }
         while let index = downloadTasks.firstIndex(where: { $0.status == .queued }) {
-            guard session != nil else {
+            guard session != nil, downloadTasks[index].sourceID == currentSourceID else {
                 downloadTasks[index].status = .failed
-                downloadTasks[index].errorMessage = "相机连接已断开"
+                downloadTasks[index].errorMessage = session == nil ? "相机连接已断开" : "当前连接的不是任务来源相机"
                 continue
             }
             workflow = .downloading
@@ -323,6 +381,7 @@ final class AppModel: ObservableObject {
                 if downloads.count > 100 { downloads = Array(downloads.prefix(100)) }
                 try? await notifications.notifyDownloadCompleted(taskID: task.id, fileName: task.asset.name, totalBytes: size)
                 lastNotifiedPercentage[task.id] = nil
+                lastNotifiedUnknownBytes[task.id] = nil
                 downloadTasks.removeAll { $0.id == task.id }
                 if config.autoExport, [.image, .video].contains(task.asset.kind) {
                     try? await MediaLibraryService.saveToPhotos(fileURL: finalURL, kind: task.asset.kind)
@@ -333,12 +392,14 @@ final class AppModel: ObservableObject {
                 try? FileManager.default.removeItem(at: partialURL)
                 notifications.removeDownloadNotification(taskID: task.id)
                 lastNotifiedPercentage[task.id] = nil
+                lastNotifiedUnknownBytes[task.id] = nil
                 downloadTasks.removeAll { $0.id == task.id }
                 notice = "已取消下载"
             } catch PTPError.cancelled {
                 try? FileManager.default.removeItem(at: partialURL)
                 notifications.removeDownloadNotification(taskID: task.id)
                 lastNotifiedPercentage[task.id] = nil
+                lastNotifiedUnknownBytes[task.id] = nil
                 downloadTasks.removeAll { $0.id == task.id }
                 notice = "已取消下载"
             } catch {
@@ -353,6 +414,7 @@ final class AppModel: ObservableObject {
                     errorMessage: error.localizedDescription
                 )
                 lastNotifiedPercentage[task.id] = nil
+                lastNotifiedUnknownBytes[task.id] = nil
                 alertMessage = "下载失败：\(error.localizedDescription)"
                 await diagnostics.log("DOWNLOAD_FAILED", phase: "DOWNLOAD", level: "ERROR", transport: session?.transport, message: task.asset.name, error: error)
             }
@@ -366,12 +428,16 @@ final class AppModel: ObservableObject {
         downloadTasks[index].totalBytes = report.total
         downloadTasks[index].bytesPerSecond = report.speed
         downloadTasks[index].remainingSeconds = report.eta
-        let percentage = report.total > 0
-            ? Int((Double(report.completed) / Double(report.total) * 100).rounded(.down))
-            : 0
-        let previous = lastNotifiedPercentage[id]
-        guard previous == nil || percentage >= (previous ?? 0) + 5 || percentage >= 100 else { return }
-        lastNotifiedPercentage[id] = percentage
+        if report.total > 0 {
+            let percentage = Int((Double(report.completed) / Double(report.total) * 100).rounded(.down))
+            let previous = lastNotifiedPercentage[id]
+            guard previous == nil || percentage >= (previous ?? 0) + 5 || percentage >= 100 else { return }
+            lastNotifiedPercentage[id] = percentage
+        } else {
+            let previous = lastNotifiedUnknownBytes[id]
+            guard previous == nil || report.completed - (previous ?? 0) >= 1_048_576 else { return }
+            lastNotifiedUnknownBytes[id] = report.completed
+        }
         let task = downloadTasks[index]
         Task {
             try? await notifications.updateDownloadProgress(
@@ -481,7 +547,7 @@ final class AppModel: ObservableObject {
                         Task { @MainActor [weak self] in self?.exportProgress = value }
                     }
                     addEditedRecord(url: output, kind: .video)
-                    try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .video)
+                    if config.autoExport { try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .video) }
                 } else {
                     let data = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
                     guard var image = UIImage(data: data) else { throw MediaProcessingError.cannotDecodeImage }
@@ -492,7 +558,7 @@ final class AppModel: ObservableObject {
                     let output = store.uniqueDownloadURL(named: sourceURL.deletingPathExtension().lastPathComponent + "_\(suffix).jpg")
                     try MediaLibraryService.writeJPEG(image: image, metadata: metadata, quality: jpegQuality(for: watermark), to: output)
                     addEditedRecord(url: output, kind: .image)
-                    try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .image)
+                    if config.autoExport { try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .image) }
                 }
                 notice = "导出完成"
             } catch { alertMessage = error.localizedDescription }
@@ -527,7 +593,7 @@ final class AppModel: ObservableObject {
                 let output = store.uniqueDownloadURL(named: "\(stem)_\(suffix.isEmpty ? "EDIT" : suffix).jpg")
                 try MediaLibraryService.writeJPEG(image: outputImage, metadata: metadata, quality: jpegQuality(for: watermark), to: output)
                 addEditedRecord(url: output, kind: .image)
-                try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .image)
+                if config.autoExport { try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .image) }
                 notice = "导出完成"
             } catch { alertMessage = error.localizedDescription }
             exportProgress = nil
@@ -740,11 +806,13 @@ final class AppModel: ObservableObject {
                 outputWasAdded = true
                 completed += 1
                 exportProgress = (Double(index) + 0.90) / Double(total)
-                remoteBatchStatus = "正在写入系统照片 \(index + 1)/\(total)"
-                do {
-                    try await MediaLibraryService.saveToPhotos(fileURL: outputURL, kind: .image)
-                } catch {
-                    failures.append("\(asset.name)：已存入下载，但系统照片写入失败（\(error.localizedDescription)）")
+                if config.autoExport {
+                    remoteBatchStatus = "正在写入系统照片 \(index + 1)/\(total)"
+                    do {
+                        try await MediaLibraryService.saveToPhotos(fileURL: outputURL, kind: .image)
+                    } catch {
+                        failures.append("\(asset.name)：已存入下载，但系统照片写入失败（\(error.localizedDescription)）")
+                    }
                 }
                 exportProgress = Double(index + 1) / Double(total)
                 await diagnostics.log(
@@ -784,7 +852,7 @@ final class AppModel: ObservableObject {
         }
 
         notice = failures.isEmpty
-            ? "批量处理完成 · \(completed) 个文件已存入下载和系统照片"
+            ? "批量处理完成 · \(completed) 个文件已存入\(config.autoExport ? "下载和系统照片" : "下载")"
             : "批量处理完成 \(completed) 个，另有 \(failures.count) 条提示"
         if !failures.isEmpty {
             let visible = failures.prefix(5).joined(separator: "\n")
@@ -843,7 +911,7 @@ final class AppModel: ObservableObject {
                             Task { @MainActor [weak self] in self?.exportProgress = (Double(completed) + child) / Double(records.count) }
                         }
                         addEditedRecord(url: output, kind: .video)
-                        try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .video)
+                        if config.autoExport { try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .video) }
                     } else {
                         let data = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
                         guard var image = UIImage(data: data) else { throw MediaProcessingError.cannotDecodeImage }
@@ -854,7 +922,7 @@ final class AppModel: ObservableObject {
                         let output = store.uniqueDownloadURL(named: sourceURL.deletingPathExtension().lastPathComponent + "_\(suffix.isEmpty ? "EDIT" : suffix).jpg")
                         try MediaLibraryService.writeJPEG(image: image, metadata: metadata, quality: jpegQuality(for: watermark), to: output)
                         addEditedRecord(url: output, kind: .image)
-                        try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .image)
+                        if config.autoExport { try? await MediaLibraryService.saveToPhotos(fileURL: output, kind: .image) }
                     }
                     completed += 1
                     exportProgress = Double(completed) / Double(records.count)
@@ -900,22 +968,27 @@ final class AppModel: ObservableObject {
 
     func diagnosticText() async -> String { await diagnostics.text() }
     func clearDiagnostics() { Task { await diagnostics.clear(); notice = "诊断数据已清除" } }
-    func clearThumbnailCache() { thumbnails.removeAll(); notice = "缩略图缓存已清理" }
+    func clearThumbnailCache() { thumbnails.removeAll(); store.clearThumbnailCache(); notice = "缩略图缓存已清理" }
 
     func handleScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .active:
             endBackgroundTask()
-            guard let session else { return }
+            guard let session else {
+                if config.usbAutoRead, ImageCaptureCameraClient.supportsDiscovery { startUSBDiscovery() }
+                return
+            }
+            if session.transport == .wifi, !config.wifiAutoRestore { return }
             Task {
                 let connected = session.transport == .wifi ? ((try? await wifiClient?.checkConnection()) != nil) : usbClient.checkConnection()
                 if !connected { self.session = nil; workflow = .waiting; notice = "相机连接已断开" }
             }
         case .background:
-            guard downloadWorker != nil, backgroundTask == .invalid else { return }
-            backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "FinishCameraChunk") { [weak self] in
+            guard downloadWorker != nil || exportProgress != nil, backgroundTask == .invalid else { return }
+            backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "FinishCameraWork") { [weak self] in
                 Task { @MainActor [weak self] in
                     self?.downloadTokens.values.forEach { $0.cancel() }
+                    self?.notice = "系统后台时间已用完，请返回应用继续"
                     self?.endBackgroundTask()
                 }
             }
@@ -957,7 +1030,9 @@ final class DownloadProgressMeter: @unchecked Sendable {
         lock.withLock {
             let now = Date()
             let normalizedTotal = max(total > 0 ? total : fallbackTotal, 0)
-            let normalizedCompleted = min(max(completed, 0), normalizedTotal)
+            let normalizedCompleted = normalizedTotal > 0
+                ? min(max(completed, 0), normalizedTotal)
+                : max(completed, 0)
             let interval = now.timeIntervalSince(lastDate)
             if interval > 0, normalizedCompleted >= lastBytes {
                 let instantaneous = Double(normalizedCompleted - lastBytes) / interval
@@ -965,8 +1040,8 @@ final class DownloadProgressMeter: @unchecked Sendable {
                 lastDate = now
                 lastBytes = normalizedCompleted
             }
-            let remaining = max(normalizedTotal - normalizedCompleted, 0)
-            let eta = smoothedSpeed.flatMap { $0 > 0 ? Int(Double(remaining) / $0) : nil }
+            let remaining = normalizedTotal > 0 ? max(normalizedTotal - normalizedCompleted, 0) : 0
+            let eta = normalizedTotal > 0 ? smoothedSpeed.flatMap { $0 > 0 ? Int(Double(remaining) / $0) : nil } : nil
             return DownloadProgressReport(completed: normalizedCompleted, total: normalizedTotal, speed: smoothedSpeed.map(Int64.init), eta: eta)
         }
     }

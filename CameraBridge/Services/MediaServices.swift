@@ -58,6 +58,16 @@ final class VideoProcessor: @unchecked Sendable {
     static let shared = VideoProcessor()
     private let lutProcessor = LUTProcessor.shared
 
+    static func estimatedRequiredBytes(sourceBytes: Int64) -> Int64 {
+        let safetyReserve: Int64 = 256 * 1_024 * 1_024
+        return max(safetyReserve, max(sourceBytes, 0) * 2 + safetyReserve)
+    }
+
+    static func availableBytes(at directory: URL) -> Int64? {
+        let values = try? directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
+    }
+
     /// Creates the same composition used by export so callers can attach it to
     /// an `AVPlayerItem` for a faithful real-time preview.
     func makeVideoComposition(
@@ -117,11 +127,21 @@ final class VideoProcessor: @unchecked Sendable {
         metadata: PhotoMetadata = PhotoMetadata(),
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
+        let sourceBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size]) as? NSNumber)?.int64Value ?? 0
+        let required = Self.estimatedRequiredBytes(sourceBytes: sourceBytes)
+        let directory = destinationURL.deletingLastPathComponent()
+        if let available = Self.availableBytes(at: directory), available < required {
+            throw MediaProcessingError.insufficientStorage(required: required, available: available)
+        }
         let asset = AVURLAsset(url: sourceURL)
         guard let exporter = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
             throw MediaProcessingError.videoExportFailed("设备不支持导出")
         }
         try? FileManager.default.removeItem(at: destinationURL)
+        var completedSuccessfully = false
+        defer {
+            if !completedSuccessfully { try? FileManager.default.removeItem(at: destinationURL) }
+        }
         exporter.outputURL = destinationURL
         exporter.outputFileType = .mp4
         exporter.shouldOptimizeForNetworkUse = true
@@ -145,7 +165,7 @@ final class VideoProcessor: @unchecked Sendable {
         }
         progress(1)
         switch exporter.status {
-        case .completed: return
+        case .completed: completedSuccessfully = true; return
         case .cancelled: throw CancellationError()
         default: throw MediaProcessingError.videoExportFailed(exporter.error?.localizedDescription ?? "未知错误")
         }

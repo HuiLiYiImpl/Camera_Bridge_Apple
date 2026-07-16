@@ -11,7 +11,7 @@ Camera Bridge 是使用 **SwiftUI、Network、Core Image、AVFoundation、PhotoK
 - `.cube`、Hald CLUT `.png` 与 Adobe `.xmp` LUT 导入
 - Core Image 实时照片预览，AVFoundation 视频预览与硬件导出
 - EXIF 水印模板、批量 LUT / 水印处理和系统分享
-- 单色、双色、四区屏幕灯光场景，亮度控制与本地保存
+- 最多八区的自由屏幕灯光场景，支持分割、合并、拖动比例、撤销、柔和度、亮度控制与本地保存
 - 连接/下载诊断日志导出
 - 暗房橙、尼康黄、专业灰、深海蓝四套主题
 
@@ -64,4 +64,4 @@ project.yml                 XcodeGen 工程定义
 
 ## 已知硬件测试状态
 
-原协议实现已在 Android 版用 Nikon Zf 验证。Apple 重写保留相同的 PTP/IP 初始化 GUID、操作码、分页顺序与自适应分块策略；仍建议在 Nikon Zf 真机热点上完成一次端到端验收后再发布 App Store。
+原协议实现已在 Android 版用 Nikon Zf 验证。Apple 重写保留相同的 PTP/IP 初始化 GUID、操作码、分页顺序与自适应分块策略；模拟器构建和自动化测试已通过。USB、相机 Wi-Fi、后台时限及大于 1 GB 视频仍建议在 Nikon Zf 与 iPhone 真机上完成端到端验收后再发布 App Store。

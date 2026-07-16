@@ -23,6 +23,8 @@ targets:
       path: CameraBridge/Info.plist
       properties:
         CFBundleDisplayName: Camera Bridge
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSApplicationCategoryType: public.app-category.photography
         NSLocalNetworkUsageDescription: Camera Bridge 需要连接相机的本地 Wi-Fi 热点以浏览和传输照片。
         NSCameraUsageDescription: Camera Bridge 需要访问通过 USB 连接的外接相机以浏览和导入照片。
@@ -44,10 +46,6 @@ targets:
         UILaunchScreen: {}
     sources:
       - path: CameraBridge
-        excludes:
-          - Resources
-    resources:
-      - path: CameraBridge/Resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.huiliyi.CameraBridge

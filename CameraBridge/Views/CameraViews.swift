@@ -70,7 +70,7 @@ struct CameraScreen: View {
                         Image(systemName: "lightbulb.max.fill").foregroundStyle(palette.accent).font(.title2)
                         VStack(alignment: .leading, spacing: 3) {
                             Text("屏幕补光").font(.headline)
-                            Text("创建并播放单色、双色或四区光场").font(.caption).foregroundStyle(palette.text.opacity(0.56))
+                            Text("创建并播放最多八区的自由补光场").font(.caption).foregroundStyle(palette.text.opacity(0.56))
                         }
                         Spacer(); Image(systemName: "chevron.right")
                     }
@@ -142,7 +142,7 @@ struct CameraScreen: View {
                         .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 16)
                         .background(palette.accent, in: RoundedRectangle(cornerRadius: 18)).foregroundStyle(palette.night)
                 }
-                .disabled(model.isBusy || model.photos.isEmpty)
+                .disabled(model.isBusy)
                 Button { showingLighting = true } label: {
                     Label("屏幕补光工具", systemImage: "lightbulb.max.fill").frame(maxWidth: .infinity)
                 }
@@ -250,7 +250,9 @@ struct USBConnectionSheet: View {
         NavigationStack {
             List {
                 Section("USB 相机") {
-                    if usb.discoveredCameras.isEmpty {
+                    if !ImageCaptureCameraClient.supportsDiscovery {
+                        ContentUnavailableView("模拟器不支持 USB 相机", systemImage: "iphone.and.arrow.forward", description: Text("请在 iPhone 或 iPad 真机上连接相机并验证 ImageCaptureCore。"))
+                    } else if usb.discoveredCameras.isEmpty {
                         ContentUnavailableView("尚未检测到相机", systemImage: "cable.connector.slash", description: Text("使用数据线连接相机，并将 USB 模式设为 PTP 或 MTP。"))
                     } else {
                         ForEach(usb.discoveredCameras) { camera in
@@ -271,6 +273,7 @@ struct USBConnectionSheet: View {
                     Button { model.startUSBDiscovery() } label: {
                         Label(usb.discoveredCameras.isEmpty ? "开始检测" : "重新检测", systemImage: "arrow.clockwise")
                     }
+                    .disabled(!ImageCaptureCameraClient.supportsDiscovery)
                 }
                 Section("排障") {
                     Label("使用支持数据传输的 USB-C 线缆或相机适配器", systemImage: "cable.connector")
@@ -282,7 +285,11 @@ struct USBConnectionSheet: View {
             .scrollContentBackground(.hidden).background(palette.night)
             .navigationTitle("USB 连接").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭", action: dismiss.callAsFunction) } }
-            .task { if usb.discoveredCameras.isEmpty { model.startUSBDiscovery() } }
+            .task {
+                if ImageCaptureCameraClient.supportsDiscovery, usb.discoveredCameras.isEmpty {
+                    model.startUSBDiscovery()
+                }
+            }
         }
     }
 }

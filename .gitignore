@@ -7,3 +7,4 @@ xcuserdata/
 .build/
 CameraBridge.xcodeproj/
 !CameraBridge.xcodeproj/project.pbxproj
+CameraBridge/Info.plist

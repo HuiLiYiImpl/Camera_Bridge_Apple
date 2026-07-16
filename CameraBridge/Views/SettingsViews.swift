@@ -20,13 +20,15 @@ struct SettingsScreen: View {
             }
             Section {
                 Picker("相机品牌", selection: $model.config.brand) { ForEach(CameraBrand.allCases) { Text($0.title + ($0.available ? "" : " · 即将支持")).tag($0) } }
+                Toggle("Wi-Fi 自动恢复", isOn: $model.config.wifiAutoRestore)
+                Toggle("USB 自动读取", isOn: $model.config.usbAutoRead)
                 TextField("PTP/IP 地址", text: $model.config.host).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.numbersAndPunctuation)
                 TextField("端口", value: $model.config.port, format: .number).keyboardType(.numberPad)
                 Toggle("传输期间保持屏幕常亮", isOn: $model.config.keepWiFiAlive)
             } header: {
                 Text("连接")
             } footer: {
-                Text("iOS 不允许第三方 App 永久锁定 Wi-Fi；相机下载进入后台后只能获得有限收尾时间。")
+                Text("Wi-Fi 自动恢复会在返回前台时检查会话；USB 自动读取会在检测到外接相机后连接并读取相册。iOS 不允许第三方 App 永久锁定 Wi-Fi，后台传输只能获得有限收尾时间。")
             }
             Section {
                 Toggle("下载后加入系统照片图库", isOn: $model.config.autoExport)

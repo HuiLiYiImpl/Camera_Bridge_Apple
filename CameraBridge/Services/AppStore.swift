@@ -17,6 +17,7 @@ final class AppStore {
         self.defaults = defaults
         encoder.dateEncodingStrategy = .iso8601
         decoder.dateDecodingStrategy = .iso8601
+        removeAbandonedPartialDownloads()
     }
 
     func loadConfig() -> CameraConfig { load(CameraConfig.self, key: Key.config) ?? CameraConfig() }
@@ -35,10 +36,18 @@ final class AppStore {
 
     func loadLightScenes() -> [LightScene] {
         load([LightScene].self, key: Key.lights) ?? [
-            LightScene(name: "单色全屏", layout: .single),
-            LightScene(name: "左右双色", layout: .leftRight, zones: [
+            LightScene(name: "暖白补光", layout: .single),
+            LightScene(name: "冷暖双色", layout: .leftRight, zones: [
                 LightZone(colorARGB: 0xFFFFC08A, intensity: 1, softness: 0.2),
                 LightZone(colorARGB: 0xFF7AB8FF, intensity: 1, softness: 0.2)
+            ]),
+            LightScene(name: "橙蓝电影光", layout: .leftRight, zones: [
+                LightZone(colorARGB: 0xFFFF8A45, intensity: 1, softness: 0.3),
+                LightZone(colorARGB: 0xFF2979FF, intensity: 1, softness: 0.3)
+            ]),
+            LightScene(name: "粉紫氛围光", layout: .topBottom, zones: [
+                LightZone(colorARGB: 0xFFFF6FAD, intensity: 0.9, softness: 0.4),
+                LightZone(colorARGB: 0xFF9B6BFF, intensity: 0.9, softness: 0.4)
             ]),
             LightScene(name: "四区光场", layout: .four)
         ]
@@ -59,6 +68,22 @@ final class AppStore {
 
     var diagnosticsDirectory: URL {
         directory(named: "Diagnostics", under: .cachesDirectory)
+    }
+
+    var thumbnailDirectory: URL {
+        directory(named: "Thumbnails", under: .cachesDirectory)
+    }
+
+    func cachedThumbnail(for asset: PhotoAsset, sourceID: String) -> Data? {
+        try? Data(contentsOf: thumbnailURL(for: asset, sourceID: sourceID), options: .mappedIfSafe)
+    }
+
+    func cacheThumbnail(_ data: Data, for asset: PhotoAsset, sourceID: String) {
+        try? data.write(to: thumbnailURL(for: asset, sourceID: sourceID), options: .atomic)
+    }
+
+    func clearThumbnailCache() {
+        try? FileManager.default.removeItem(at: thumbnailDirectory)
     }
 
     func url(for record: DownloadRecord) -> URL {
@@ -99,6 +124,17 @@ final class AppStore {
             if !FileManager.default.fileExists(atPath: candidate.path) { return candidate }
             index += 1
         }
+    }
+
+    private func thumbnailURL(for asset: PhotoAsset, sourceID: String) -> URL {
+        let namespace = sourceID.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? String($0) : "_" }.joined()
+        let safeName = asset.name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_")
+        return thumbnailDirectory.appendingPathComponent("\(namespace)-\(asset.handle)-\(asset.size)-\(safeName).thumb")
+    }
+
+    private func removeAbandonedPartialDownloads() {
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: downloadsDirectory, includingPropertiesForKeys: nil) else { return }
+        for url in urls where url.pathExtension == "part" { try? FileManager.default.removeItem(at: url) }
     }
 
     private func load<T: Decodable>(_ type: T.Type, key: String) -> T? {

@@ -30,7 +30,7 @@ struct RootView: View {
 
     var body: some View {
         let palette = BridgePalette.palette(for: model.config.colorTheme)
-        TabView(selection: $selectedTab) {
+        TabView(selection: tabSelection) {
             NavigationStack { CameraScreen(openGallery: { selectedTab = .photos }, openSettings: { selectedTab = .settings }) }
                 .tag(AppTab.camera).tabItem { Label(AppTab.camera.title, systemImage: AppTab.camera.symbol) }
             NavigationStack { GalleryScreen() }
@@ -53,5 +53,19 @@ struct RootView: View {
         .alert("Camera Bridge", isPresented: $showingAlert) {
             Button("好") { model.alertMessage = nil }
         } message: { Text(model.alertMessage ?? "") }
+    }
+
+    private var tabSelection: Binding<AppTab> {
+        Binding(
+            get: { selectedTab },
+            set: { requested in
+                if requested == .photos, model.session == nil {
+                    selectedTab = .camera
+                    model.notice = "请先连接相机"
+                } else {
+                    selectedTab = requested
+                }
+            }
+        )
     }
 }
