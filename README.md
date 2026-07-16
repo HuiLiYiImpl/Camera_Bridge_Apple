@@ -42,6 +42,12 @@ xcodebuild -project CameraBridge.xcodeproj \
 
 真机运行前，在 Xcode 的 Signing & Capabilities 中选择自己的 Team。首次连接时允许“本地网络”权限，并先在系统设置中加入相机创建的 Wi-Fi 热点。
 
+## 未上架安装与测试
+
+App 不需要先上架 App Store 才能测试。个人单机测试建议直接用 **Xcode 真机安装**；多人持续测试建议使用 **TestFlight**；需要完全离线分发给少量已登记设备时可导出 **Ad Hoc IPA**。
+
+详细的证书准备、安装步骤、更新方式和常见错误见 [INSTALLATION.md](INSTALLATION.md)。相机 Wi-Fi、USB、系统照片权限、后台行为及大视频导出必须在 iPhone / iPad 真机验证，模拟器不能替代这些测试。
+
 ## 使用
 
 1. 在 Nikon 相机中选择“连接到智能设备”并启用 AP mode。
